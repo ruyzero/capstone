@@ -59,100 +59,157 @@ $access_list = $conn->query("
     <meta charset="UTF-8">
     <title>Grant Midwife Access - RHU MIS</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons/font/bootstrap-icons.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Merriweather:wght@700&display=swap" rel="stylesheet">
     <style>
         body {
-            background-color: #f8f9fa;
+            background-color: #f4f6f9;
+            font-family: 'Inter', sans-serif;
+        }
+        h2, h4 {
+            font-family: 'Merriweather', serif;
         }
         .container {
-            max-width: 1000px;
+            max-width: 960px;
             margin-top: 40px;
         }
+        .form-label {
+            font-weight: 600;
+        }
+        .table th, .table td {
+            vertical-align: middle;
+        }
+        .month-box {
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        text-align: center;
+        min-width: 80px;
+    }
+
     </style>
 </head>
 <body>
 
 <div class="container">
+    <!-- Header -->
     <div class="d-flex justify-content-between align-items-center mb-4">
-        <h2>📅 Grant Midwife Barangay Access</h2>
-        <a href="admin_dashboard.php" class="btn btn-secondary">← Back to Dashboard</a>
+        <h2><i class="bi bi-calendar2-plus-fill"></i> Grant Midwife Barangay Access</h2>
+        <a href="admin_dashboard.php" class="btn btn-outline-secondary"><i class="bi bi-arrow-left"></i> Back</a>
     </div>
 
+    <!-- Success + Warning Messages -->
     <?php if (!empty($success)): ?>
-        <div class="alert alert-success"><?php echo $success; ?></div>
+        <div class="alert alert-success d-flex align-items-center" role="alert">
+            <i class="bi bi-check-circle-fill me-2"></i> <?= $success; ?>
+        </div>
     <?php endif; ?>
 
     <?php if (!empty($messages)): ?>
         <div class="alert alert-warning">
-            <strong>Notice:</strong><br>
-            <?php foreach ($messages as $msg) echo "<div>• $msg</div>"; ?>
+            <strong><i class="bi bi-exclamation-circle-fill"></i> Notice:</strong><br>
+            <?php foreach ($messages as $msg): ?>
+                <div>• <?= $msg; ?></div>
+            <?php endforeach; ?>
         </div>
     <?php endif; ?>
 
-    <div class="card mb-4">
-        <div class="card-header bg-primary text-white">Assign Barangay Access to Midwife</div>
+    <!-- Form Section -->
+    <div class="card mb-5 shadow-sm">
+        <div class="card-header bg-primary text-white">
+            <i class="bi bi-person-plus-fill"></i> Assign Barangay Access
+        </div>
         <div class="card-body">
             <form method="POST">
+                <!-- Midwife Dropdown -->
                 <div class="mb-3">
-                    <label class="form-label">Select Midwife:</label>
+                    <label class="form-label">Select Midwife</label>
                     <select name="midwife_id" class="form-select" required>
                         <option value="">-- Choose Midwife --</option>
                         <?php while ($m = $midwives->fetch_assoc()): ?>
-                            <option value="<?php echo $m['id']; ?>"><?php echo $m['username']; ?></option>
+                            <option value="<?= $m['id']; ?>"><?= htmlspecialchars($m['username']); ?></option>
                         <?php endwhile; ?>
                     </select>
                 </div>
 
+                <!-- Barangay Multi-Select -->
                 <div class="mb-3">
-                    <label class="form-label">Select Barangays:</label>
+                    <label class="form-label">Select Barangays</label>
                     <select name="barangay_ids[]" class="form-select" multiple required size="6">
                         <?php mysqli_data_seek($barangays, 0); while ($b = $barangays->fetch_assoc()): ?>
-                            <option value="<?php echo $b['id']; ?>"><?php echo $b['name']; ?></option>
+                            <option value="<?= $b['id']; ?>"><?= htmlspecialchars($b['name']); ?></option>
                         <?php endwhile; ?>
                     </select>
-                    <small class="text-muted">Hold Ctrl (Windows) or Command (Mac) to select multiple.</small>
+                    <small class="text-muted">Hold Ctrl (Windows) or Cmd (Mac) to select multiple.</small>
                 </div>
 
-                <div class="row">
-                    <div class="col-md-6 mb-3">
-                        <label class="form-label">Start Month (YYYY-MM):</label>
+                <!-- Start Month and Duration -->
+                <div class="row g-3 mb-4">
+                    <div class="col-md-6">
+                        <label class="form-label">Start Month</label>
                         <input type="month" name="start_month" class="form-control" required>
                     </div>
-
-                    <div class="col-md-6 mb-3">
-                        <label class="form-label">Duration (Months):</label>
+                    <div class="col-md-6">
+                        <label class="form-label">Duration (Months)</label>
                         <select name="month_count" class="form-select" required>
                             <?php for ($i = 1; $i <= 12; $i++): ?>
-                                <option value="<?php echo $i; ?>"><?php echo $i; ?> month<?php echo $i > 1 ? 's' : ''; ?></option>
+                                <option value="<?= $i; ?>"><?= $i; ?> month<?= $i > 1 ? 's' : ''; ?></option>
                             <?php endfor; ?>
                         </select>
                     </div>
                 </div>
 
-                <button type="submit" class="btn btn-success w-100">Grant Access</button>
+                <!-- Submit Button -->
+                <button type="submit" class="btn btn-success w-100">
+                    <i class="bi bi-check2-circle"></i> Grant Access
+                </button>
             </form>
         </div>
     </div>
 
-    <h4 class="mb-3">🗂️ Existing Access Records</h4>
-    <table class="table table-bordered bg-white">
-        <thead class="table-light">
-            <tr>
-                <th>Midwife</th>
-                <th>Barangay</th>
-                <th>Access Month</th>
-            </tr>
-        </thead>
-        <tbody>
-            <?php while ($row = $access_list->fetch_assoc()): ?>
-                <tr>
-                    <td><?php echo htmlspecialchars($row['username']); ?></td>
-                    <td><?php echo htmlspecialchars($row['barangay']); ?></td>
-                    <td><?php echo date("F Y", strtotime($row['access_month'])); ?></td>
-                </tr>
-            <?php endwhile; ?>
-        </tbody>
-    </table>
-</div>
+    <!-- Access Table -->
+    <h4 class="mb-3"><i class="bi bi-list-columns-reverse"></i> Access Overview by Midwife</h4>
+
+<?php
+$allMonths = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+// Fetch all access and group it
+$access_by_midwife = [];
+mysqli_data_seek($access_list, 0);
+while ($row = $access_list->fetch_assoc()) {
+    $midwife = $row['username'];
+    $barangay = $row['barangay'];
+    $month = date('F', strtotime($row['access_month']));
+    $access_by_midwife[$midwife][$barangay][] = $month;
+}
+?>
+
+<?php if (!empty($access_by_midwife)): ?>
+    <?php foreach ($access_by_midwife as $midwife => $barangays): ?>
+        <div class="card mb-4 shadow-sm">
+            <div class="card-header bg-primary text-white">
+                <strong><i class="bi bi-person-badge-fill"></i> Midwife:</strong> <?= htmlspecialchars($midwife); ?>
+            </div>
+            <div class="card-body">
+                <?php foreach ($barangays as $barangay => $months): ?>
+                    <div class="mb-3">
+                        <h6 class="mb-2"><i class="bi bi-house-fill text-secondary"></i> <?= htmlspecialchars($barangay); ?></h6>
+                        <div class="d-flex flex-wrap gap-2">
+                            <?php foreach ($allMonths as $m): ?>
+                                <div class="month-box <?= in_array($m, $months) ? 'bg-danger text-white fw-bold' : 'bg-light text-muted'; ?>">
+                                    <?= $m ?>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+    <?php endforeach; ?>
+<?php else: ?>
+    <div class="alert alert-info"><i class="bi bi-info-circle"></i> No barangay access records found.</div>
+<?php endif; ?>
+
 
 </body>
 </html>

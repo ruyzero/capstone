@@ -31,32 +31,23 @@
 </head>
 <body>
 
-    <div class="login-box">
-        <div class="text-center">
-            <img src="logo.png" alt="RHU Logo" class="logo">
-            <h4 class="mb-4">RHU-MIS Login</h4>
-        </div>
-
-        <?php if (isset($_SESSION['error'])): ?>
-            <div class="alert alert-danger">
-                <?php echo $_SESSION['error']; unset($_SESSION['error']); ?>
-            </div>
-        <?php endif; ?>
-
-        <form action="login.php" method="POST">
-            <div class="mb-3">
-                <label for="username" class="form-label">Username</label>
-                <input type="text" name="username" class="form-control" id="username" required>
-            </div>
-
-            <div class="mb-3">
-                <label for="password" class="form-label">Password</label>
-                <input type="password" name="password" class="form-control" id="password" required>
-            </div>
-
-            <button type="submit" class="btn btn-primary w-100">Login</button>
-        </form>
+<div class="login-box">
+    <div class="text-center">
+        <img src="logo.png" alt="RHU Logo" class="logo">
+        <h4 class="mb-4">RHU-MIS System</h4>
     </div>
+
+    <?php if (isset($_SESSION['error'])): ?>
+        <div class="alert alert-danger">
+            <?php echo $_SESSION['error']; unset($_SESSION['error']); ?>
+        </div>
+    <?php endif; ?>
+
+    <div class="d-grid gap-2">
+        <a href="login_form.php" class="btn btn-primary">Login</a>
+        <a href="request_admin.php" class="btn btn-outline-secondary">Request</a>
+    </div>
+</div>
 
 </body>
 </html>
