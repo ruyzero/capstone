@@ -58,7 +58,7 @@ CREATE TABLE `prenatal_enrollments` (
 $flash = $_SESSION['flash'] ?? null;
 unset($_SESSION['flash']);
 
-/* ---------- Filters ---------- */
+/* ---------- Filters (GET) ---------- */
 $q        = trim($_GET['q'] ?? '');
 $brgy_id  = (int)($_GET['barangay_id'] ?? 0);
 $show     = $_GET['show'] ?? 'not_enrolled'; // not_enrolled | enrolled | all
@@ -82,14 +82,85 @@ $brgystmt->bind_param("i", $municipality_id);
 $brgystmt->execute();
 $barangays = $brgystmt->get_result();
 
-/* ---------- Enrollment action (POST) ---------- */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['patient_ids']) && is_array($_POST['patient_ids'])) {
+/* ================================================
+   Enrollment / Removal actions
+   ================================================ */
+
+/* -- Single-row enroll -- */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['single_enroll'], $_POST['patient_id'])) {
+    $pid = (int)$_POST['patient_id'];
+
+    // Preserve filters on redirect
+    $redir_q   = $_POST['f_q']   ?? $q;
+    $redir_brg = (int)($_POST['f_barangay_id'] ?? $brgy_id);
+    $redir_shw = $_POST['f_show'] ?? $show;
+
+    // Validate patient belongs to this municipality
+    $chk = $conn->prepare("SELECT id FROM pregnant_women WHERE id = ? AND municipality_id = ? LIMIT 1");
+    $chk->bind_param("ii", $pid, $municipality_id);
+    $chk->execute();
+    if (!$chk->get_result()->fetch_row()) {
+        $_SESSION['flash'] = ['type' => 'danger', 'msg' => 'Invalid patient or outside your municipality.'];
+        header("Location: add_monitoring.php?" . http_build_query(['q'=>$redir_q,'barangay_id'=>$redir_brg,'show'=>$redir_shw]));
+        exit();
+    }
+
+    // Insert if not exists
+    $ins = $conn->prepare("
+        INSERT INTO {$ENROLL_TABLE} (patient_id, enrolled_by)
+        SELECT ?, ?
+        FROM DUAL
+        WHERE NOT EXISTS (SELECT 1 FROM {$ENROLL_TABLE} WHERE patient_id = ?)
+    ");
+    $ins->bind_param("iii", $pid, $_SESSION['user_id'], $pid);
+    $ins->execute();
+
+    $_SESSION['flash'] = ($ins->affected_rows > 0)
+        ? ['type' => 'success', 'msg' => 'Patient enrolled for prenatal monitoring.']
+        : ['type' => 'info',    'msg' => 'Patient is already enrolled.'];
+
+    header("Location: add_monitoring.php?" . http_build_query(['q'=>$redir_q,'barangay_id'=>$redir_brg,'show'=>$redir_shw]));
+    exit();
+}
+
+/* -- Single-row REMOVE -- */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['single_remove'], $_POST['patient_id'])) {
+    $pid = (int)$_POST['patient_id'];
+
+    // Preserve filters on redirect
+    $redir_q   = $_POST['f_q']   ?? $q;
+    $redir_brg = (int)($_POST['f_barangay_id'] ?? $brgy_id);
+    $redir_shw = $_POST['f_show'] ?? $show;
+
+    // Validate patient belongs to this municipality
+    $chk = $conn->prepare("SELECT id FROM pregnant_women WHERE id = ? AND municipality_id = ? LIMIT 1");
+    $chk->bind_param("ii", $pid, $municipality_id);
+    $chk->execute();
+    if (!$chk->get_result()->fetch_row()) {
+        $_SESSION['flash'] = ['type' => 'danger', 'msg' => 'Invalid patient or outside your municipality.'];
+        header("Location: add_monitoring.php?" . http_build_query(['q'=>$redir_q,'barangay_id'=>$redir_brg,'show'=>$redir_shw]));
+        exit();
+    }
+
+    // Delete enrollment
+    $del = $conn->prepare("DELETE FROM {$ENROLL_TABLE} WHERE patient_id = ? LIMIT 1");
+    $del->bind_param("i", $pid);
+    $del->execute();
+
+    $_SESSION['flash'] = ($del->affected_rows > 0)
+        ? ['type' => 'success', 'msg' => 'Patient removed from prenatal monitoring.']
+        : ['type' => 'info',    'msg' => 'Patient was not enrolled.'];
+
+    header("Location: add_monitoring.php?" . http_build_query(['q'=>$redir_q,'barangay_id'=>$redir_brg,'show'=>$redir_shw]));
+    exit();
+}
+
+/* -- Bulk enroll (IDs arrive via hidden inputs created by JS) -- */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['bulk_enroll']) && !empty($_POST['patient_ids']) && is_array($_POST['patient_ids'])) {
     $selected = array_map('intval', $_POST['patient_ids']);
     $inserted = 0; $skipped = 0; $invalid = 0;
 
-    // Prepared statements we’ll reuse
     $chk = $conn->prepare("SELECT id FROM pregnant_women WHERE id = ? AND municipality_id = ? LIMIT 1");
-    $exists = $conn->prepare("SELECT id FROM {$ENROLL_TABLE} WHERE patient_id = ? LIMIT 1");
     $ins = $conn->prepare("
         INSERT INTO {$ENROLL_TABLE} (patient_id, enrolled_by)
         SELECT ?, ?
@@ -98,22 +169,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['patient_ids']) && is_
     ");
 
     foreach ($selected as $pid) {
-        // Validate patient belongs to this municipality
         $chk->bind_param("ii", $pid, $municipality_id);
         $chk->execute();
         if (!$chk->get_result()->fetch_row()) { $invalid++; continue; }
 
-        // Insert if not exists
         $ins->bind_param("iii", $pid, $_SESSION['user_id'], $pid);
         if ($ins->execute() && $ins->affected_rows > 0) $inserted++;
-        else $skipped++; // duplicate or insert ignored
+        else $skipped++;
     }
 
     $_SESSION['flash'] = [
         'type' => 'success',
         'msg'  => "Enrollment complete — Added: {$inserted}, Skipped: {$skipped}, Invalid: {$invalid}."
     ];
-    header("Location: add_monitoring.php?" . http_build_query(['q'=>$q, 'barangay_id'=>$brgy_id, 'show'=>$show]));
+    // Preserve filters
+    $redir_q   = $_POST['f_q']   ?? $q;
+    $redir_brg = (int)($_POST['f_barangay_id'] ?? $brgy_id);
+    $redir_shw = $_POST['f_show'] ?? $show;
+    header("Location: add_monitoring.php?" . http_build_query(['q'=>$redir_q,'barangay_id'=>$redir_brg,'show'=>$redir_shw]));
     exit();
 }
 
@@ -147,7 +220,6 @@ if ($show === 'not_enrolled') {
 } elseif ($show === 'enrolled') {
     $sql .= " AND e.id IS NOT NULL";
 }
-// else 'all' => no extra filter
 
 $sql .= " ORDER BY p.last_name IS NULL, p.last_name ASC, p.first_name ASC";
 
@@ -189,7 +261,7 @@ function age_of($dob) {
     *{ box-sizing:border-box }
     body{ margin:0; background:#fff; font-family:'Inter', system-ui, -apple-system, Segoe UI, Roboto, Arial; }
 
-    /* 3-column grid: leftbar | main | right rail */
+    /* 3-column grid: leftbar | main | rail */
     .layout{ display:grid; grid-template-columns: var(--sidebar-w) 1fr 320px; min-height:100vh; }
 
     /* Left sidebar (matches other pages) */
@@ -286,7 +358,7 @@ function age_of($dob) {
                 <select name="barangay_id" class="form-select">
                     <option value="0">All Barangays</option>
                     <?php if ($barangays): while ($b = $barangays->fetch_assoc()): ?>
-                        <option value="<?= (int)$b['id'] ?>" <?= $brgy_id== (int)$b['id'] ? 'selected':'' ?>>
+                        <option value="<?= (int)$b['id'] ?>" <?= $brgy_id===(int)$b['id']?'selected':'' ?>>
                             <?= h($b['name']) ?>
                         </option>
                     <?php endwhile; endif; ?>
@@ -305,11 +377,20 @@ function age_of($dob) {
             </div>
         </form>
 
-        <!-- Patients table -->
-        <form method="post" class="panel">
+        <!-- Bulk Enroll form (hidden container gets filled by JS) -->
+        <form id="bulkEnrollForm" method="post" class="d-none">
+            <input type="hidden" name="bulk_enroll" value="1">
+            <input type="hidden" name="f_q" value="<?= h($q) ?>">
+            <input type="hidden" name="f_barangay_id" value="<?= (int)$brgy_id ?>">
+            <input type="hidden" name="f_show" value="<?= h($show) ?>">
+            <div id="bulkContainer"></div>
+        </form>
+
+        <!-- Table + actions -->
+        <div class="panel">
             <div class="d-flex justify-content-between align-items-center mb-2">
                 <h6 class="mb-0">Patients</h6>
-                <button type="submit" class="btn btn-success btn-sm">
+                <button type="button" class="btn btn-success btn-sm" onclick="submitBulkEnroll()">
                     <i class="bi bi-check2-circle"></i> Enroll Selected
                 </button>
             </div>
@@ -324,20 +405,21 @@ function age_of($dob) {
                             <th class="text-center" style="width:180px">Barangay</th>
                             <th class="text-center" style="width:170px">Date Registered</th>
                             <th class="text-center" style="width:130px">Enrolled?</th>
+                            <th class="text-center" style="width:160px">Action</th>
                         </tr>
                     </thead>
                     <tbody>
                     <?php if ($patients && $patients->num_rows > 0): ?>
                         <?php while ($row = $patients->fetch_assoc()):
                             $name = full_name($row);
-                            $age = $row['dob'] ? age_of($row['dob']) : null;
-                            $dateReg = $row['date_registered'] ? date('M d, Y', strtotime($row['date_registered'])) : '—';
+                            $age  = $row['dob'] ? age_of($row['dob']) : null;
+                            $dateReg  = $row['date_registered'] ? date('M d, Y', strtotime($row['date_registered'])) : '—';
                             $enrolled = (int)$row['is_enrolled'] === 1;
                         ?>
                         <tr>
                             <td class="text-center">
                                 <?php if (!$enrolled): ?>
-                                    <input type="checkbox" name="patient_ids[]" value="<?= (int)$row['id'] ?>">
+                                    <input type="checkbox" class="selbox" value="<?= (int)$row['id'] ?>">
                                 <?php else: ?>
                                     <input type="checkbox" disabled>
                                 <?php endif; ?>
@@ -347,27 +429,44 @@ function age_of($dob) {
                             <td class="text-center"><?= h($row['barangay'] ?? '—') ?></td>
                             <td class="text-center"><span class="pill"><?= $dateReg ?></span></td>
                             <td class="text-center">
+                                <?= $enrolled ? '<span class="pill ok">Yes</span>' : '<span class="pill no">No</span>' ?>
+                            </td>
+                            <td class="text-center">
                                 <?php if ($enrolled): ?>
-                                    <span class="pill ok">Yes</span>
+                                    <!-- Single REMOVE -->
+                                    <form method="post" class="d-inline" onsubmit="return confirm('Remove this patient from monitoring?');">
+                                        <input type="hidden" name="single_remove" value="1">
+                                        <input type="hidden" name="patient_id" value="<?= (int)$row['id'] ?>">
+                                        <input type="hidden" name="f_q" value="<?= h($q) ?>">
+                                        <input type="hidden" name="f_barangay_id" value="<?= (int)$brgy_id ?>">
+                                        <input type="hidden" name="f_show" value="<?= h($show) ?>">
+                                        <button class="btn btn-outline-danger btn-sm" type="submit">
+                                            <i class="bi bi-x-circle"></i> Remove
+                                        </button>
+                                    </form>
                                 <?php else: ?>
-                                    <span class="pill no">No</span>
+                                    <!-- Single ENROLL -->
+                                    <form method="post" class="d-inline">
+                                        <input type="hidden" name="single_enroll" value="1">
+                                        <input type="hidden" name="patient_id" value="<?= (int)$row['id'] ?>">
+                                        <input type="hidden" name="f_q" value="<?= h($q) ?>">
+                                        <input type="hidden" name="f_barangay_id" value="<?= (int)$brgy_id ?>">
+                                        <input type="hidden" name="f_show" value="<?= h($show) ?>">
+                                        <button class="btn btn-success btn-sm" type="submit">
+                                            <i class="bi bi-check2-circle"></i> Enroll
+                                        </button>
+                                    </form>
                                 <?php endif; ?>
                             </td>
                         </tr>
                         <?php endwhile; ?>
                     <?php else: ?>
-                        <tr><td colspan="6" class="text-center text-muted py-4">No matching patients found.</td></tr>
+                        <tr><td colspan="7" class="text-center text-muted py-4">No matching patients found.</td></tr>
                     <?php endif; ?>
                     </tbody>
                 </table>
             </div>
-
-            <div class="text-end mt-2">
-                <button type="submit" class="btn btn-success">
-                    <i class="bi bi-check2-circle"></i> Enroll Selected
-                </button>
-            </div>
-        </form>
+        </div>
     </main>
 
     <!-- Right rail -->
@@ -398,9 +497,29 @@ function age_of($dob) {
 </div>
 
 <script>
+/* Select all */
 document.getElementById('chkAll')?.addEventListener('change', function(){
-    document.querySelectorAll('input[name="patient_ids[]"]:not(:disabled)').forEach(cb => cb.checked = this.checked);
+    document.querySelectorAll('.selbox:not(:disabled)').forEach(cb => cb.checked = this.checked);
 });
+
+/* Bulk enroll: copy selected IDs into hidden form and submit */
+function submitBulkEnroll(){
+    const sel = Array.from(document.querySelectorAll('.selbox:checked')).map(cb => cb.value);
+    if (sel.length === 0) {
+        alert('Select at least one patient to enroll.');
+        return;
+    }
+    const cont = document.getElementById('bulkContainer');
+    cont.innerHTML = '';
+    sel.forEach(id => {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'patient_ids[]';
+        input.value = id;
+        cont.appendChild(input);
+    });
+    document.getElementById('bulkEnrollForm').submit();
+}
 </script>
 </body>
 </html>
