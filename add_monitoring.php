@@ -1,0 +1,406 @@
+<?php
+session_start();
+require 'db.php';
+date_default_timezone_set('Asia/Manila');
+
+/* ---------- Auth ---------- */
+if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
+    header("Location: index.php");
+    exit();
+}
+
+/* ---------- Helpers ---------- */
+function h($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
+function table_exists(mysqli $conn, string $name): bool {
+    $q = $conn->prepare("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1");
+    $q->bind_param("s", $name);
+    $q->execute();
+    $ok = (bool)$q->get_result()->fetch_row();
+    $q->close();
+    return $ok;
+}
+
+/* ---------- Session / Identity ---------- */
+$municipality_id   = (int)($_SESSION['municipality_id'] ?? 0);
+$municipality_name = $_SESSION['municipality_name'] ?? '';
+$username          = $_SESSION['username'] ?? 'admin';
+$handle            = '@' . strtolower(preg_replace('/\s+/', '', "rhu{$municipality_name}"));
+
+/* Fallback lookup for municipality name if not in session */
+if ($municipality_name === '' && $municipality_id > 0) {
+    $stmt = $conn->prepare("SELECT name FROM municipalities WHERE id = ? LIMIT 1");
+    $stmt->bind_param("i", $municipality_id);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    if ($row) $municipality_name = $row['name'];
+    $stmt->close();
+}
+
+if (!$municipality_id) { die("No municipality set for this admin."); }
+
+/* ---------- Ensure enrollments table exists ---------- */
+$ENROLL_TABLE = 'prenatal_enrollments';
+if (!table_exists($conn, $ENROLL_TABLE)) {
+    die("Table `{$ENROLL_TABLE}` does not exist. Please create it first:
+<pre>
+CREATE TABLE `prenatal_enrollments` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `patient_id` INT NOT NULL,
+  `enrolled_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  `enrolled_by` INT NULL,
+  INDEX (`patient_id`),
+  INDEX (`enrolled_by`)
+);
+</pre>");
+}
+
+/* ---------- Flash helper ---------- */
+$flash = $_SESSION['flash'] ?? null;
+unset($_SESSION['flash']);
+
+/* ---------- Filters ---------- */
+$q        = trim($_GET['q'] ?? '');
+$brgy_id  = (int)($_GET['barangay_id'] ?? 0);
+$show     = $_GET['show'] ?? 'not_enrolled'; // not_enrolled | enrolled | all
+
+/* ---------- Right rail stats ---------- */
+$c1 = $conn->prepare("SELECT COUNT(*) AS c FROM pregnant_women WHERE municipality_id = ?");
+$c1->bind_param("i", $municipality_id);
+$c1->execute();
+$tot_patients = (int)($c1->get_result()->fetch_assoc()['c'] ?? 0);
+
+$c2 = $conn->prepare("SELECT COUNT(*) AS c FROM barangays WHERE municipality_id = ?");
+$c2->bind_param("i", $municipality_id);
+$c2->execute();
+$tot_brgy = (int)($c2->get_result()->fetch_assoc()['c'] ?? 0);
+
+$tot_pregnant = $tot_patients;
+
+/* ---------- Barangay options (scoped) ---------- */
+$brgystmt = $conn->prepare("SELECT id, name FROM barangays WHERE municipality_id = ? ORDER BY name");
+$brgystmt->bind_param("i", $municipality_id);
+$brgystmt->execute();
+$barangays = $brgystmt->get_result();
+
+/* ---------- Enrollment action (POST) ---------- */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['patient_ids']) && is_array($_POST['patient_ids'])) {
+    $selected = array_map('intval', $_POST['patient_ids']);
+    $inserted = 0; $skipped = 0; $invalid = 0;
+
+    // Prepared statements we’ll reuse
+    $chk = $conn->prepare("SELECT id FROM pregnant_women WHERE id = ? AND municipality_id = ? LIMIT 1");
+    $exists = $conn->prepare("SELECT id FROM {$ENROLL_TABLE} WHERE patient_id = ? LIMIT 1");
+    $ins = $conn->prepare("
+        INSERT INTO {$ENROLL_TABLE} (patient_id, enrolled_by)
+        SELECT ?, ?
+        FROM DUAL
+        WHERE NOT EXISTS (SELECT 1 FROM {$ENROLL_TABLE} WHERE patient_id = ?)
+    ");
+
+    foreach ($selected as $pid) {
+        // Validate patient belongs to this municipality
+        $chk->bind_param("ii", $pid, $municipality_id);
+        $chk->execute();
+        if (!$chk->get_result()->fetch_row()) { $invalid++; continue; }
+
+        // Insert if not exists
+        $ins->bind_param("iii", $pid, $_SESSION['user_id'], $pid);
+        if ($ins->execute() && $ins->affected_rows > 0) $inserted++;
+        else $skipped++; // duplicate or insert ignored
+    }
+
+    $_SESSION['flash'] = [
+        'type' => 'success',
+        'msg'  => "Enrollment complete — Added: {$inserted}, Skipped: {$skipped}, Invalid: {$invalid}."
+    ];
+    header("Location: add_monitoring.php?" . http_build_query(['q'=>$q, 'barangay_id'=>$brgy_id, 'show'=>$show]));
+    exit();
+}
+
+/* ---------- Patients list (with enrollment state) ---------- */
+$sql = "
+    SELECT 
+        p.id,
+        p.first_name, p.middle_name, p.last_name, p.suffix,
+        p.dob, p.date_registered,
+        b.name AS barangay,
+        CASE WHEN e.id IS NULL THEN 0 ELSE 1 END AS is_enrolled
+    FROM pregnant_women p
+    LEFT JOIN barangays b ON b.id = p.barangay_id
+    LEFT JOIN {$ENROLL_TABLE} e ON e.patient_id = p.id
+    WHERE p.municipality_id = ?
+";
+$params = [$municipality_id];
+$types  = "i";
+
+if ($brgy_id > 0) {
+    $sql .= " AND p.barangay_id = ?";
+    $params[] = $brgy_id; $types .= "i";
+}
+if ($q !== '') {
+    $sql .= " AND (CONCAT_WS(' ', p.first_name, p.middle_name, p.last_name, p.suffix) LIKE ? OR b.name LIKE ?)";
+    $like = "%$q%";
+    $params[] = $like; $params[] = $like; $types .= "ss";
+}
+if ($show === 'not_enrolled') {
+    $sql .= " AND e.id IS NULL";
+} elseif ($show === 'enrolled') {
+    $sql .= " AND e.id IS NOT NULL";
+}
+// else 'all' => no extra filter
+
+$sql .= " ORDER BY p.last_name IS NULL, p.last_name ASC, p.first_name ASC";
+
+$stmt = $conn->prepare($sql);
+$stmt->bind_param($types, ...$params);
+$stmt->execute();
+$patients = $stmt->get_result();
+
+/* ---------- View helpers ---------- */
+function full_name($row) {
+    $parts = array_filter([
+        $row['first_name'] ?? '',
+        $row['middle_name'] ?? '',
+        $row['last_name'] ?? '',
+        $row['suffix'] ?? ''
+    ], fn($x) => $x !== null && trim($x) !== '');
+    return trim(implode(' ', $parts));
+}
+function age_of($dob) {
+    if (!$dob) return null;
+    try { $d = new DateTime($dob); return (new DateTime())->diff($d)->y; }
+    catch (Exception $e) { return null; }
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Enroll Patients • Prenatal Monitoring • RHU-MIS</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons/font/bootstrap-icons.css" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Merriweather:wght@700&display=swap" rel="stylesheet">
+<style>
+    :root{
+        --teal-1:#20C4B2; --teal-2:#1A9E9D; --bg:#f5f7fa; --ring:#e5e7eb;
+        --sidebar-w:260px; --brand:#00a39a; --brand-dark:#0e6f6a;
+    }
+    *{ box-sizing:border-box }
+    body{ margin:0; background:#fff; font-family:'Inter', system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+
+    /* 3-column grid: leftbar | main | right rail */
+    .layout{ display:grid; grid-template-columns: var(--sidebar-w) 1fr 320px; min-height:100vh; }
+
+    /* Left sidebar (matches other pages) */
+    .leftbar{ width: var(--sidebar-w); background:#fff; border-right:1px solid #eef0f3; padding:24px 16px; color:#111827; }
+    .brand{ display:flex; gap:10px; align-items:center; margin-bottom:24px; font-family:'Merriweather',serif; font-weight:700; color:#111; }
+    .brand .mark{ width:36px; height:36px; border-radius:50%; background:linear-gradient(135deg,#25d3c7,#0fb5aa); display:grid; place-items:center; color:#fff; font-weight:800; }
+    .nav-link{ color:#6b7280; border-radius:10px; padding:.6rem .8rem; font-weight:600; }
+    .nav-link:hover{ background:#f2f6f9; color:#0f172a; }
+    .nav-link.active{ background:linear-gradient(135deg,#2fd4c8,#0fb5aa); color:#fff; }
+    .nav-link i{ width:22px; text-align:center; margin-right:8px; }
+
+    /* Main */
+    .main{ padding:24px; background:#fff; }
+    .topbar{ display:flex; justify-content:space-between; align-items:center; margin-bottom:22px; gap:16px; }
+    .searchbar{ flex:1; position:relative; }
+    .searchbar input{ padding-left:40px; height:44px; border-radius:999px; background:#f7f9fb; border:1px solid #e6ebf0; }
+    .searchbar i{ position:absolute; left:14px; top:50%; transform:translateY(-50%); color:#64748b; }
+
+    .filters .form-select, .filters .form-control { height:44px; }
+    .filters .btn { height:44px; }
+
+    .panel{ background:#fff; border:1px solid #eef0f3; border-radius:16px; padding:18px; }
+    .table > :not(caption) > * > *{ vertical-align:middle; }
+    .table thead th{ color:#0f172a; font-weight:700; background:#f7fafc; border-bottom:1px solid #eef0f3 !important; }
+    .pill{ display:inline-block; padding:.25rem .6rem; border-radius:999px; background:#eef0f3; color:#334155; font-weight:700; font-size:.85rem; }
+    .pill.ok{ background:#e8fff1; color:#0f766e; border:1px solid #99f6e4; }
+    .pill.no{ background:#fff7e6; color:#a16207; border:1px solid #fde68a; }
+
+    /* Right rail (matches dashboard) */
+    .rail{ padding:24px 18px; display:flex; flex-direction:column; gap:18px; }
+    .profile{ background:#fff; border:1px solid var(--ring); border-radius:16px; padding:14px 16px; display:flex; align-items:center; gap:12px;}
+    .avatar{ width:44px; height:44px; border-radius:50%; background:#e6fffb; display:grid; place-items:center; color:#0f766e; font-weight:800; }
+    .stat{ background:#fff; border:1px solid var(--ring); border-radius:16px; padding:16px; text-align:center; }
+    .stat .label{ color:#6b7280; font-weight:600; }
+    .stat .big{ font-size:64px; font-weight:800; line-height:1; color:#111827; }
+    .stat.gradient{ color:#fff; border:0; background:linear-gradient(160deg, var(--teal-1), var(--teal-2)); box-shadow:0 10px 28px rgba(16,185,129,.2); }
+    .stat.gradient .label{ color:#e7fffb; }
+
+    /* Responsive */
+    @media (max-width:1100px){ .layout{ grid-template-columns: var(--sidebar-w) 1fr; } .rail{ grid-column:1 / -1; } }
+    @media (max-width:992px){ .leftbar{ width:100%; border-right:none; border-bottom:1px solid #eef0f3; } }
+</style>
+</head>
+<body>
+
+<div class="layout">
+    <!-- Left Sidebar -->
+    <aside class="leftbar">
+        <div class="brand">
+            <div class="mark">R</div>
+            <div>
+                <div>RHU-MIS</div>
+                <small class="text-muted"><?= h(strtoupper($municipality_name)) ?></small>
+            </div>
+        </div>
+
+        <nav class="nav flex-column gap-1">
+            <a class="nav-link" href="admin_dashboard.php"><i class="bi bi-speedometer2"></i> Dashboard</a>
+            <a class="nav-link" href="view_pregnancies.php"><i class="bi bi-people"></i> Patients</a>
+            <a class="nav-link" href="manage_midwives.php"><i class="bi bi-person-heart"></i> Midwives</a>
+            <a class="nav-link" href="manage_announcements.php"><i class="bi bi-megaphone"></i> Announcements</a>
+            <a class="nav-link" href="barangay_health_centers.php"><i class="bi bi-building"></i> Brgy. Health Centers</a>
+            <a class="nav-link active" href="prenatal_monitoring.php"><i class="bi bi-clipboard2-pulse"></i> Prenatal Monitoring</a>
+            <a class="nav-link" href="request_data_transfer.php"><i class="bi bi-arrow-left-right"></i> Request Data Transfer</a>
+            <a class="nav-link" href="manage_accounts.php"><i class="bi bi-person-fill-gear"></i> Manage Accounts</a>
+            <hr>
+            <a class="nav-link" href="my_account.php"><i class="bi bi-person-circle"></i> My Account</a>
+            <a class="nav-link" href="logout.php"><i class="bi bi-box-arrow-right"></i> Sign Out</a>
+        </nav>
+    </aside>
+
+    <!-- Main -->
+    <main class="main">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+            <h4 class="mb-0">Enroll Patients for Prenatal Monitoring</h4>
+            <a href="prenatal_monitoring.php" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> Back to Monitoring</a>
+        </div>
+
+        <?php if ($flash): ?>
+            <div class="alert alert-<?= h($flash['type'] ?? 'info') ?> mt-3"><?= h($flash['msg'] ?? '') ?></div>
+        <?php endif; ?>
+
+        <!-- Filters -->
+        <form class="row g-2 align-items-end mt-3 mb-3 filters" method="get" action="">
+            <div class="col-md-4">
+                <label class="form-label">Search</label>
+                <div class="searchbar">
+                    <i class="bi bi-search"></i>
+                    <input type="text" name="q" class="form-control" placeholder="Name or Barangay" value="<?= h($q) ?>">
+                </div>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Barangay</label>
+                <select name="barangay_id" class="form-select">
+                    <option value="0">All Barangays</option>
+                    <?php if ($barangays): while ($b = $barangays->fetch_assoc()): ?>
+                        <option value="<?= (int)$b['id'] ?>" <?= $brgy_id== (int)$b['id'] ? 'selected':'' ?>>
+                            <?= h($b['name']) ?>
+                        </option>
+                    <?php endwhile; endif; ?>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Show</label>
+                <select name="show" class="form-select">
+                    <option value="not_enrolled" <?= $show==='not_enrolled'?'selected':'' ?>>Not Enrolled Only</option>
+                    <option value="enrolled"     <?= $show==='enrolled'?'selected':'' ?>>Already Enrolled Only</option>
+                    <option value="all"          <?= $show==='all'?'selected':'' ?>>All</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-primary w-100" type="submit">Filter</button>
+            </div>
+        </form>
+
+        <!-- Patients table -->
+        <form method="post" class="panel">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h6 class="mb-0">Patients</h6>
+                <button type="submit" class="btn btn-success btn-sm">
+                    <i class="bi bi-check2-circle"></i> Enroll Selected
+                </button>
+            </div>
+
+            <div class="table-responsive">
+                <table class="table align-middle">
+                    <thead>
+                        <tr>
+                            <th style="width:42px"><input type="checkbox" id="chkAll" /></th>
+                            <th class="text-start">Fullname</th>
+                            <th class="text-center" style="width:100px">Age</th>
+                            <th class="text-center" style="width:180px">Barangay</th>
+                            <th class="text-center" style="width:170px">Date Registered</th>
+                            <th class="text-center" style="width:130px">Enrolled?</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    <?php if ($patients && $patients->num_rows > 0): ?>
+                        <?php while ($row = $patients->fetch_assoc()):
+                            $name = full_name($row);
+                            $age = $row['dob'] ? age_of($row['dob']) : null;
+                            $dateReg = $row['date_registered'] ? date('M d, Y', strtotime($row['date_registered'])) : '—';
+                            $enrolled = (int)$row['is_enrolled'] === 1;
+                        ?>
+                        <tr>
+                            <td class="text-center">
+                                <?php if (!$enrolled): ?>
+                                    <input type="checkbox" name="patient_ids[]" value="<?= (int)$row['id'] ?>">
+                                <?php else: ?>
+                                    <input type="checkbox" disabled>
+                                <?php endif; ?>
+                            </td>
+                            <td class="text-start"><?= h($name ?: '—') ?></td>
+                            <td class="text-center"><?= $age !== null ? (int)$age : '—' ?></td>
+                            <td class="text-center"><?= h($row['barangay'] ?? '—') ?></td>
+                            <td class="text-center"><span class="pill"><?= $dateReg ?></span></td>
+                            <td class="text-center">
+                                <?php if ($enrolled): ?>
+                                    <span class="pill ok">Yes</span>
+                                <?php else: ?>
+                                    <span class="pill no">No</span>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                        <?php endwhile; ?>
+                    <?php else: ?>
+                        <tr><td colspan="6" class="text-center text-muted py-4">No matching patients found.</td></tr>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="text-end mt-2">
+                <button type="submit" class="btn btn-success">
+                    <i class="bi bi-check2-circle"></i> Enroll Selected
+                </button>
+            </div>
+        </form>
+    </main>
+
+    <!-- Right rail -->
+    <aside class="rail">
+        <div class="profile">
+            <div class="avatar"><i class="bi bi-person"></i></div>
+            <div>
+                <div class="fw-bold"><?= h($username) ?></div>
+                <div class="text-muted small"><?= h($handle) ?></div>
+            </div>
+        </div>
+
+        <div class="stat">
+            <div class="label">Total Patient Record</div>
+            <div class="big"><?= $tot_patients ?></div>
+        </div>
+
+        <div class="stat gradient">
+            <div class="label">Total Brgy. Health Center</div>
+            <div class="big"><?= $tot_brgy ?></div>
+        </div>
+
+        <div class="stat">
+            <div class="label">Total Pregnant Patient</div>
+            <div class="big"><?= $tot_pregnant ?></div>
+        </div>
+    </aside>
+</div>
+
+<script>
+document.getElementById('chkAll')?.addEventListener('change', function(){
+    document.querySelectorAll('input[name="patient_ids[]"]:not(:disabled)').forEach(cb => cb.checked = this.checked);
+});
+</script>
+</body>
+</html>
