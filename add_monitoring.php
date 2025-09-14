@@ -11,244 +11,51 @@ if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
 
 /* ---------- Helpers ---------- */
 function h($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
-function table_exists(mysqli $conn, string $name): bool {
-    $q = $conn->prepare("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1");
-    $q->bind_param("s", $name);
-    $q->execute();
-    $ok = (bool)$q->get_result()->fetch_row();
-    $q->close();
-    return $ok;
-}
 
-/* ---------- Session / Identity ---------- */
+/* ---------- Identity / Session ---------- */
 $municipality_id   = (int)($_SESSION['municipality_id'] ?? 0);
 $municipality_name = $_SESSION['municipality_name'] ?? '';
 $username          = $_SESSION['username'] ?? 'admin';
 $handle            = '@' . strtolower(preg_replace('/\s+/', '', "rhu{$municipality_name}"));
 
-/* Fallback lookup for municipality name if not in session */
 if ($municipality_name === '' && $municipality_id > 0) {
     $stmt = $conn->prepare("SELECT name FROM municipalities WHERE id = ? LIMIT 1");
     $stmt->bind_param("i", $municipality_id);
     $stmt->execute();
-    $row = $stmt->get_result()->fetch_assoc();
-    if ($row) $municipality_name = $row['name'];
+    $r = $stmt->get_result()->fetch_assoc();
+    if ($r) $municipality_name = $r['name'];
     $stmt->close();
 }
 
 if (!$municipality_id) { die("No municipality set for this admin."); }
 
-/* ---------- Ensure enrollments table exists ---------- */
-$ENROLL_TABLE = 'prenatal_enrollments';
-if (!table_exists($conn, $ENROLL_TABLE)) {
-    die("Table `{$ENROLL_TABLE}` does not exist. Please create it first:
-<pre>
-CREATE TABLE `prenatal_enrollments` (
-  `id` INT AUTO_INCREMENT PRIMARY KEY,
-  `patient_id` INT NOT NULL,
-  `enrolled_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
-  `enrolled_by` INT NULL,
-  INDEX (`patient_id`),
-  INDEX (`enrolled_by`)
-);
-</pre>");
-}
-
-/* ---------- Flash helper ---------- */
-$flash = $_SESSION['flash'] ?? null;
-unset($_SESSION['flash']);
-
-/* ---------- Filters (GET) ---------- */
-$q        = trim($_GET['q'] ?? '');
-$brgy_id  = (int)($_GET['barangay_id'] ?? 0);
-$show     = $_GET['show'] ?? 'not_enrolled'; // not_enrolled | enrolled | all
-
 /* ---------- Right rail stats ---------- */
-$c1 = $conn->prepare("SELECT COUNT(*) AS c FROM pregnant_women WHERE municipality_id = ?");
-$c1->bind_param("i", $municipality_id);
-$c1->execute();
-$tot_patients = (int)($c1->get_result()->fetch_assoc()['c'] ?? 0);
+$tot_patients = 0; $tot_brgy = 0; $tot_pregnant = 0;
 
-$c2 = $conn->prepare("SELECT COUNT(*) AS c FROM barangays WHERE municipality_id = ?");
-$c2->bind_param("i", $municipality_id);
-$c2->execute();
-$tot_brgy = (int)($c2->get_result()->fetch_assoc()['c'] ?? 0);
+$s = $conn->prepare("SELECT COUNT(*) c FROM pregnant_women WHERE municipality_id = ?");
+$s->bind_param("i", $municipality_id); $s->execute();
+$tot_patients = (int)($s->get_result()->fetch_assoc()['c'] ?? 0);
+
+$s = $conn->prepare("SELECT COUNT(*) c FROM barangays WHERE municipality_id = ?");
+$s->bind_param("i", $municipality_id); $s->execute();
+$tot_brgy = (int)($s->get_result()->fetch_assoc()['c'] ?? 0);
 
 $tot_pregnant = $tot_patients;
 
-/* ---------- Barangay options (scoped) ---------- */
-$brgystmt = $conn->prepare("SELECT id, name FROM barangays WHERE municipality_id = ? ORDER BY name");
-$brgystmt->bind_param("i", $municipality_id);
-$brgystmt->execute();
-$barangays = $brgystmt->get_result();
-
-/* ================================================
-   Enrollment / Removal actions
-   ================================================ */
-
-/* -- Single-row enroll -- */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['single_enroll'], $_POST['patient_id'])) {
-    $pid = (int)$_POST['patient_id'];
-
-    // Preserve filters on redirect
-    $redir_q   = $_POST['f_q']   ?? $q;
-    $redir_brg = (int)($_POST['f_barangay_id'] ?? $brgy_id);
-    $redir_shw = $_POST['f_show'] ?? $show;
-
-    // Validate patient belongs to this municipality
-    $chk = $conn->prepare("SELECT id FROM pregnant_women WHERE id = ? AND municipality_id = ? LIMIT 1");
-    $chk->bind_param("ii", $pid, $municipality_id);
-    $chk->execute();
-    if (!$chk->get_result()->fetch_row()) {
-        $_SESSION['flash'] = ['type' => 'danger', 'msg' => 'Invalid patient or outside your municipality.'];
-        header("Location: add_monitoring.php?" . http_build_query(['q'=>$redir_q,'barangay_id'=>$redir_brg,'show'=>$redir_shw]));
-        exit();
-    }
-
-    // Insert if not exists
-    $ins = $conn->prepare("
-        INSERT INTO {$ENROLL_TABLE} (patient_id, enrolled_by)
-        SELECT ?, ?
-        FROM DUAL
-        WHERE NOT EXISTS (SELECT 1 FROM {$ENROLL_TABLE} WHERE patient_id = ?)
-    ");
-    $ins->bind_param("iii", $pid, $_SESSION['user_id'], $pid);
-    $ins->execute();
-
-    $_SESSION['flash'] = ($ins->affected_rows > 0)
-        ? ['type' => 'success', 'msg' => 'Patient enrolled for prenatal monitoring.']
-        : ['type' => 'info',    'msg' => 'Patient is already enrolled.'];
-
-    header("Location: add_monitoring.php?" . http_build_query(['q'=>$redir_q,'barangay_id'=>$redir_brg,'show'=>$redir_shw]));
-    exit();
-}
-
-/* -- Single-row REMOVE -- */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['single_remove'], $_POST['patient_id'])) {
-    $pid = (int)$_POST['patient_id'];
-
-    // Preserve filters on redirect
-    $redir_q   = $_POST['f_q']   ?? $q;
-    $redir_brg = (int)($_POST['f_barangay_id'] ?? $brgy_id);
-    $redir_shw = $_POST['f_show'] ?? $show;
-
-    // Validate patient belongs to this municipality
-    $chk = $conn->prepare("SELECT id FROM pregnant_women WHERE id = ? AND municipality_id = ? LIMIT 1");
-    $chk->bind_param("ii", $pid, $municipality_id);
-    $chk->execute();
-    if (!$chk->get_result()->fetch_row()) {
-        $_SESSION['flash'] = ['type' => 'danger', 'msg' => 'Invalid patient or outside your municipality.'];
-        header("Location: add_monitoring.php?" . http_build_query(['q'=>$redir_q,'barangay_id'=>$redir_brg,'show'=>$redir_shw]));
-        exit();
-    }
-
-    // Delete enrollment
-    $del = $conn->prepare("DELETE FROM {$ENROLL_TABLE} WHERE patient_id = ? LIMIT 1");
-    $del->bind_param("i", $pid);
-    $del->execute();
-
-    $_SESSION['flash'] = ($del->affected_rows > 0)
-        ? ['type' => 'success', 'msg' => 'Patient removed from prenatal monitoring.']
-        : ['type' => 'info',    'msg' => 'Patient was not enrolled.'];
-
-    header("Location: add_monitoring.php?" . http_build_query(['q'=>$redir_q,'barangay_id'=>$redir_brg,'show'=>$redir_shw]));
-    exit();
-}
-
-/* -- Bulk enroll (IDs arrive via hidden inputs created by JS) -- */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['bulk_enroll']) && !empty($_POST['patient_ids']) && is_array($_POST['patient_ids'])) {
-    $selected = array_map('intval', $_POST['patient_ids']);
-    $inserted = 0; $skipped = 0; $invalid = 0;
-
-    $chk = $conn->prepare("SELECT id FROM pregnant_women WHERE id = ? AND municipality_id = ? LIMIT 1");
-    $ins = $conn->prepare("
-        INSERT INTO {$ENROLL_TABLE} (patient_id, enrolled_by)
-        SELECT ?, ?
-        FROM DUAL
-        WHERE NOT EXISTS (SELECT 1 FROM {$ENROLL_TABLE} WHERE patient_id = ?)
-    ");
-
-    foreach ($selected as $pid) {
-        $chk->bind_param("ii", $pid, $municipality_id);
-        $chk->execute();
-        if (!$chk->get_result()->fetch_row()) { $invalid++; continue; }
-
-        $ins->bind_param("iii", $pid, $_SESSION['user_id'], $pid);
-        if ($ins->execute() && $ins->affected_rows > 0) $inserted++;
-        else $skipped++;
-    }
-
-    $_SESSION['flash'] = [
-        'type' => 'success',
-        'msg'  => "Enrollment complete — Added: {$inserted}, Skipped: {$skipped}, Invalid: {$invalid}."
-    ];
-    // Preserve filters
-    $redir_q   = $_POST['f_q']   ?? $q;
-    $redir_brg = (int)($_POST['f_barangay_id'] ?? $brgy_id);
-    $redir_shw = $_POST['f_show'] ?? $show;
-    header("Location: add_monitoring.php?" . http_build_query(['q'=>$redir_q,'barangay_id'=>$redir_brg,'show'=>$redir_shw]));
-    exit();
-}
-
-/* ---------- Patients list (with enrollment state) ---------- */
-$sql = "
-    SELECT 
-        p.id,
-        p.first_name, p.middle_name, p.last_name, p.suffix,
-        p.dob, p.date_registered,
-        b.name AS barangay,
-        CASE WHEN e.id IS NULL THEN 0 ELSE 1 END AS is_enrolled
-    FROM pregnant_women p
-    LEFT JOIN barangays b ON b.id = p.barangay_id
-    LEFT JOIN {$ENROLL_TABLE} e ON e.patient_id = p.id
-    WHERE p.municipality_id = ?
-";
-$params = [$municipality_id];
-$types  = "i";
-
-if ($brgy_id > 0) {
-    $sql .= " AND p.barangay_id = ?";
-    $params[] = $brgy_id; $types .= "i";
-}
-if ($q !== '') {
-    $sql .= " AND (CONCAT_WS(' ', p.first_name, p.middle_name, p.last_name, p.suffix) LIKE ? OR b.name LIKE ?)";
-    $like = "%$q%";
-    $params[] = $like; $params[] = $like; $types .= "ss";
-}
-if ($show === 'not_enrolled') {
-    $sql .= " AND e.id IS NULL";
-} elseif ($show === 'enrolled') {
-    $sql .= " AND e.id IS NOT NULL";
-}
-
-$sql .= " ORDER BY p.last_name IS NULL, p.last_name ASC, p.first_name ASC";
-
-$stmt = $conn->prepare($sql);
-$stmt->bind_param($types, ...$params);
-$stmt->execute();
-$patients = $stmt->get_result();
-
-/* ---------- View helpers ---------- */
-function full_name($row) {
-    $parts = array_filter([
-        $row['first_name'] ?? '',
-        $row['middle_name'] ?? '',
-        $row['last_name'] ?? '',
-        $row['suffix'] ?? ''
-    ], fn($x) => $x !== null && trim($x) !== '');
-    return trim(implode(' ', $parts));
-}
-function age_of($dob) {
-    if (!$dob) return null;
-    try { $d = new DateTime($dob); return (new DateTime())->diff($d)->y; }
-    catch (Exception $e) { return null; }
-}
+/* ---------- Barangays for this municipality ---------- */
+$barangays = [];
+$bs = $conn->prepare("SELECT id, name FROM barangays WHERE municipality_id = ? ORDER BY name");
+$bs->bind_param("i", $municipality_id);
+$bs->execute();
+$resB = $bs->get_result();
+while ($row = $resB->fetch_assoc()) { $barangays[] = $row; }
+$bs->close();
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Enroll Patients • Prenatal Monitoring • RHU-MIS</title>
+<title>Add Patient for Monitoring • RHU-MIS</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons/font/bootstrap-icons.css" rel="stylesheet">
@@ -259,56 +66,85 @@ function age_of($dob) {
         --sidebar-w:260px; --brand:#00a39a; --brand-dark:#0e6f6a;
     }
     *{ box-sizing:border-box }
-    body{ margin:0; background:#fff; font-family:'Inter', system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    body{
+        margin:0; background:#fff;
+        font-family:'Inter', system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans";
+    }
 
-    /* 3-column grid: leftbar | main | rail */
+    /* ===== 3-col grid ===== */
     .layout{ display:grid; grid-template-columns: var(--sidebar-w) 1fr 320px; min-height:100vh; }
 
-    /* Left sidebar (matches other pages) */
-    .leftbar{ width: var(--sidebar-w); background:#fff; border-right:1px solid #eef0f3; padding:24px 16px; color:#111827; }
-    .brand{ display:flex; gap:10px; align-items:center; margin-bottom:24px; font-family:'Merriweather',serif; font-weight:700; color:#111; }
-    .brand .mark{ width:36px; height:36px; border-radius:50%; background:linear-gradient(135deg,#25d3c7,#0fb5aa); display:grid; place-items:center; color:#fff; font-weight:800; }
-    .nav-link{ color:#6b7280; border-radius:10px; padding:.6rem .8rem; font-weight:600; }
+    /* Left bar (same style as other pages) */
+    .leftbar{
+        width: var(--sidebar-w);
+        background:#ffffff;
+        border-right: 1px solid #eef0f3;
+        padding: 24px 16px;
+        color:#111827;
+    }
+    .brand{
+        display:flex; gap:10px; align-items:center; margin-bottom:24px;
+        font-family: 'Merriweather', serif; font-weight:700; color:#111;
+    }
+    .brand .mark{
+        width:36px; height:36px; border-radius:50%;
+        background: linear-gradient(135deg, #25d3c7, #0fb5aa);
+        display:grid; place-items:center; color:#fff; font-weight:800;
+    }
+    .nav-link{
+        color:#6b7280; border-radius:10px; padding:.6rem .8rem; font-weight:600;
+    }
     .nav-link:hover{ background:#f2f6f9; color:#0f172a; }
-    .nav-link.active{ background:linear-gradient(135deg,#2fd4c8,#0fb5aa); color:#fff; }
+    .nav-link.active{ background: linear-gradient(135deg, #2fd4c8, #0fb5aa); color:#fff; }
     .nav-link i{ width:22px; text-align:center; margin-right:8px; }
 
     /* Main */
-    .main{ padding:24px; background:#fff; }
-    .topbar{ display:flex; justify-content:space-between; align-items:center; margin-bottom:22px; gap:16px; }
-    .searchbar{ flex:1; position:relative; }
-    .searchbar input{ padding-left:40px; height:44px; border-radius:999px; background:#f7f9fb; border:1px solid #e6ebf0; }
+    .main{ padding:24px; background:#ffffff; }
+    .topbar{ display:flex; justify-content:space-between; align-items:center; margin-bottom:22px; }
+    .searchbar{ flex:1; max-width:640px; position:relative; }
+    .searchbar input{
+        padding-left:40px; height:44px; border-radius:999px; background:#f7f9fb; border:1px solid #e6ebf0;
+    }
     .searchbar i{ position:absolute; left:14px; top:50%; transform:translateY(-50%); color:#64748b; }
 
-    .filters .form-select, .filters .form-control { height:44px; }
-    .filters .btn { height:44px; }
+    .form-card{
+        max-width:520px; margin:0 auto; background:#fff; border:1px solid #eef0f3; border-radius:16px; padding:22px;
+    }
+    .form-card h4{ text-align:center; font-family:'Merriweather',serif; font-weight:700; margin-bottom:18px; }
+    .form-control, .form-select{ height:44px; }
+    .submit-btn{
+        display:block; margin:12px auto 0; padding:10px 28px; border-radius:999px; border:none;
+        background:linear-gradient(135deg, var(--teal-1), var(--teal-2)); color:#fff; font-weight:800;
+    }
+    .submit-btn:hover{ opacity:.95; }
 
-    .panel{ background:#fff; border:1px solid #eef0f3; border-radius:16px; padding:18px; }
-    .table > :not(caption) > * > *{ vertical-align:middle; }
-    .table thead th{ color:#0f172a; font-weight:700; background:#f7fafc; border-bottom:1px solid #eef0f3 !important; }
-    .pill{ display:inline-block; padding:.25rem .6rem; border-radius:999px; background:#eef0f3; color:#334155; font-weight:700; font-size:.85rem; }
-    .pill.ok{ background:#e8fff1; color:#0f766e; border:1px solid #99f6e4; }
-    .pill.no{ background:#fff7e6; color:#a16207; border:1px solid #fde68a; }
-
-    /* Right rail (matches dashboard) */
-    .rail{ padding:24px 18px; display:flex; flex-direction:column; gap:18px; }
+    /* Right rail (same as dashboard) */
+    .rail{ padding:24px 18px; display:flex; flex-direction:column; gap:18px; background:transparent; }
     .profile{ background:#fff; border:1px solid var(--ring); border-radius:16px; padding:14px 16px; display:flex; align-items:center; gap:12px;}
     .avatar{ width:44px; height:44px; border-radius:50%; background:#e6fffb; display:grid; place-items:center; color:#0f766e; font-weight:800; }
     .stat{ background:#fff; border:1px solid var(--ring); border-radius:16px; padding:16px; text-align:center; }
     .stat .label{ color:#6b7280; font-weight:600; }
     .stat .big{ font-size:64px; font-weight:800; line-height:1; color:#111827; }
-    .stat.gradient{ color:#fff; border:0; background:linear-gradient(160deg, var(--teal-1), var(--teal-2)); box-shadow:0 10px 28px rgba(16,185,129,.2); }
+    .stat.gradient{
+        color:#fff; border:0; background:linear-gradient(160deg, var(--teal-1), var(--teal-2));
+        box-shadow: 0 10px 28px rgba(16,185,129,.2);
+    }
     .stat.gradient .label{ color:#e7fffb; }
 
     /* Responsive */
-    @media (max-width:1100px){ .layout{ grid-template-columns: var(--sidebar-w) 1fr; } .rail{ grid-column:1 / -1; } }
-    @media (max-width:992px){ .leftbar{ width:100%; border-right:none; border-bottom:1px solid #eef0f3; } }
+    @media (max-width: 1100px){
+        .layout{ grid-template-columns: var(--sidebar-w) 1fr; }
+        .rail{ grid-column: 1 / -1; }
+    }
+    @media (max-width: 992px){
+        .leftbar{ width:100%; border-right:none; border-bottom:1px solid #eef0f3; }
+    }
 </style>
 </head>
 <body>
 
 <div class="layout">
-    <!-- Left Sidebar -->
+    <!-- Left -->
     <aside class="leftbar">
         <div class="brand">
             <div class="mark">R</div>
@@ -326,7 +162,7 @@ function age_of($dob) {
             <a class="nav-link" href="barangay_health_centers.php"><i class="bi bi-building"></i> Brgy. Health Centers</a>
             <a class="nav-link active" href="prenatal_monitoring.php"><i class="bi bi-clipboard2-pulse"></i> Prenatal Monitoring</a>
             <a class="nav-link" href="request_data_transfer.php"><i class="bi bi-arrow-left-right"></i> Request Data Transfer</a>
-            <a class="nav-link" href="manage_accounts.php"><i class="bi bi-person-fill-gear"></i> Manage Accounts</a>
+            <a class="nav-link" href="manage_accounts.php"><i class="bi bi-people-gear"></i> Manage Accounts</a>
             <hr>
             <a class="nav-link" href="my_account.php"><i class="bi bi-person-circle"></i> My Account</a>
             <a class="nav-link" href="logout.php"><i class="bi bi-box-arrow-right"></i> Sign Out</a>
@@ -335,137 +171,89 @@ function age_of($dob) {
 
     <!-- Main -->
     <main class="main">
-        <div class="d-flex justify-content-between align-items-center mb-1">
-            <h4 class="mb-0">Enroll Patients for Prenatal Monitoring</h4>
-            <a href="prenatal_monitoring.php" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> Back to Monitoring</a>
+        <div class="topbar">
+            <div class="searchbar w-100" style="max-width:720px;">
+                <i class="bi bi-search"></i>
+                <input type="text" class="form-control" placeholder="Search Here" disabled>
+            </div>
         </div>
 
-        <?php if ($flash): ?>
-            <div class="alert alert-<?= h($flash['type'] ?? 'info') ?> mt-3"><?= h($flash['msg'] ?? '') ?></div>
-        <?php endif; ?>
-
-        <!-- Filters -->
-        <form class="row g-2 align-items-end mt-3 mb-3 filters" method="get" action="">
-            <div class="col-md-4">
-                <label class="form-label">Search</label>
-                <div class="searchbar">
-                    <i class="bi bi-search"></i>
-                    <input type="text" name="q" class="form-control" placeholder="Name or Barangay" value="<?= h($q) ?>">
+        <div class="form-card">
+            <h4>Add Patient for Monitoring</h4>
+            <form method="POST" action="save_monitoring.php" id="monitoringForm" novalidate>
+                <!-- Barangay -->
+                <div class="mb-3">
+                    <select class="form-select" id="barangay_id" name="barangay_id" required>
+                        <option value="">Barangay</option>
+                        <?php foreach ($barangays as $b): ?>
+                            <option value="<?= (int)$b['id'] ?>"><?= h($b['name']) ?></option>
+                        <?php endforeach; ?>
+                    </select>
                 </div>
-            </div>
-            <div class="col-md-3">
-                <label class="form-label">Barangay</label>
-                <select name="barangay_id" class="form-select">
-                    <option value="0">All Barangays</option>
-                    <?php if ($barangays): while ($b = $barangays->fetch_assoc()): ?>
-                        <option value="<?= (int)$b['id'] ?>" <?= $brgy_id===(int)$b['id']?'selected':'' ?>>
-                            <?= h($b['name']) ?>
-                        </option>
-                    <?php endwhile; endif; ?>
-                </select>
-            </div>
-            <div class="col-md-3">
-                <label class="form-label">Show</label>
-                <select name="show" class="form-select">
-                    <option value="not_enrolled" <?= $show==='not_enrolled'?'selected':'' ?>>Not Enrolled Only</option>
-                    <option value="enrolled"     <?= $show==='enrolled'?'selected':'' ?>>Already Enrolled Only</option>
-                    <option value="all"          <?= $show==='all'?'selected':'' ?>>All</option>
-                </select>
-            </div>
-            <div class="col-md-2">
-                <button class="btn btn-primary w-100" type="submit">Filter</button>
-            </div>
-        </form>
 
-        <!-- Bulk Enroll form (hidden container gets filled by JS) -->
-        <form id="bulkEnrollForm" method="post" class="d-none">
-            <input type="hidden" name="bulk_enroll" value="1">
-            <input type="hidden" name="f_q" value="<?= h($q) ?>">
-            <input type="hidden" name="f_barangay_id" value="<?= (int)$brgy_id ?>">
-            <input type="hidden" name="f_show" value="<?= h($show) ?>">
-            <div id="bulkContainer"></div>
-        </form>
+                <!-- Patient (ajax) -->
+                <div class="mb-3">
+                    <select class="form-select" id="patient_id" name="patient_id" required disabled>
+                        <option value="">Select Patient</option>
+                    </select>
+                </div>
 
-        <!-- Table + actions -->
-        <div class="panel">
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <h6 class="mb-0">Patients</h6>
-                <button type="button" class="btn btn-success btn-sm" onclick="submitBulkEnroll()">
-                    <i class="bi bi-check2-circle"></i> Enroll Selected
-                </button>
-            </div>
+                <!-- First Checkup Date -->
+                <div class="mb-3">
+                    <div>First Check-Up Date</div>
+                    <input type="date" class="form-control" name="first_checkup_date" id="first_checkup_date" placeholder="First Checkup Date" required>
+                </div>
 
-            <div class="table-responsive">
-                <table class="table align-middle">
-                    <thead>
-                        <tr>
-                            <th style="width:42px"><input type="checkbox" id="chkAll" /></th>
-                            <th class="text-start">Fullname</th>
-                            <th class="text-center" style="width:100px">Age</th>
-                            <th class="text-center" style="width:180px">Barangay</th>
-                            <th class="text-center" style="width:170px">Date Registered</th>
-                            <th class="text-center" style="width:130px">Enrolled?</th>
-                            <th class="text-center" style="width:160px">Action</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                    <?php if ($patients && $patients->num_rows > 0): ?>
-                        <?php while ($row = $patients->fetch_assoc()):
-                            $name = full_name($row);
-                            $age  = $row['dob'] ? age_of($row['dob']) : null;
-                            $dateReg  = $row['date_registered'] ? date('M d, Y', strtotime($row['date_registered'])) : '—';
-                            $enrolled = (int)$row['is_enrolled'] === 1;
-                        ?>
-                        <tr>
-                            <td class="text-center">
-                                <?php if (!$enrolled): ?>
-                                    <input type="checkbox" class="selbox" value="<?= (int)$row['id'] ?>">
-                                <?php else: ?>
-                                    <input type="checkbox" disabled>
-                                <?php endif; ?>
-                            </td>
-                            <td class="text-start"><?= h($name ?: '—') ?></td>
-                            <td class="text-center"><?= $age !== null ? (int)$age : '—' ?></td>
-                            <td class="text-center"><?= h($row['barangay'] ?? '—') ?></td>
-                            <td class="text-center"><span class="pill"><?= $dateReg ?></span></td>
-                            <td class="text-center">
-                                <?= $enrolled ? '<span class="pill ok">Yes</span>' : '<span class="pill no">No</span>' ?>
-                            </td>
-                            <td class="text-center">
-                                <?php if ($enrolled): ?>
-                                    <!-- Single REMOVE -->
-                                    <form method="post" class="d-inline" onsubmit="return confirm('Remove this patient from monitoring?');">
-                                        <input type="hidden" name="single_remove" value="1">
-                                        <input type="hidden" name="patient_id" value="<?= (int)$row['id'] ?>">
-                                        <input type="hidden" name="f_q" value="<?= h($q) ?>">
-                                        <input type="hidden" name="f_barangay_id" value="<?= (int)$brgy_id ?>">
-                                        <input type="hidden" name="f_show" value="<?= h($show) ?>">
-                                        <button class="btn btn-outline-danger btn-sm" type="submit">
-                                            <i class="bi bi-x-circle"></i> Remove
-                                        </button>
-                                    </form>
-                                <?php else: ?>
-                                    <!-- Single ENROLL -->
-                                    <form method="post" class="d-inline">
-                                        <input type="hidden" name="single_enroll" value="1">
-                                        <input type="hidden" name="patient_id" value="<?= (int)$row['id'] ?>">
-                                        <input type="hidden" name="f_q" value="<?= h($q) ?>">
-                                        <input type="hidden" name="f_barangay_id" value="<?= (int)$brgy_id ?>">
-                                        <input type="hidden" name="f_show" value="<?= h($show) ?>">
-                                        <button class="btn btn-success btn-sm" type="submit">
-                                            <i class="bi bi-check2-circle"></i> Enroll
-                                        </button>
-                                    </form>
-                                <?php endif; ?>
-                            </td>
-                        </tr>
-                        <?php endwhile; ?>
-                    <?php else: ?>
-                        <tr><td colspan="7" class="text-center text-muted py-4">No matching patients found.</td></tr>
-                    <?php endif; ?>
-                    </tbody>
-                </table>
-            </div>
+                <!-- Age (auto from selected patient DOB) -->
+                <div class="mb-3">
+                    <input type="text" class="form-control" id="age_display" placeholder="Age" readonly>
+                </div>
+
+                <!-- Weight (kg) -->
+                <div class="mb-3">
+                    <input type="number" step="0.1" min="0" class="form-control" name="weight_kg" placeholder="Weight (kg)">
+                </div>
+
+                <!-- Height (ft) -->
+                <div class="mb-3">
+                    <input type="number" step="0.01" min="0" class="form-control" name="height_ft" placeholder="Height (Ft)">
+                </div>
+
+                <!-- Nutritional status -->
+                <div class="mb-3">
+                    <select class="form-select" name="nutritional_status">
+                        <option value="">Nutritional Status</option>
+                        <option>Normal</option>
+                        <option>Underweight</option>
+                        <option>Overweight</option>
+                        <option>Obese</option>
+                    </select>
+                </div>
+
+                <!-- LMP -->
+                <div class="mb-3">
+                    <div>Last Menstruation Date</div>
+                    <input type="date" class="form-control" name="lmp" id="lmp" placeholder="Last Menstruation Date">
+                </div>
+
+                <!-- EDD (auto from LMP if provided) -->
+                <div class="mb-3">
+                    <div>Expected Delivery Date</div>
+                    <input type="date" class="form-control" name="edd" id="edd" placeholder="Expected Delivery Date">
+                </div>
+
+                <!-- Pregnancy number -->
+                <div class="mb-3">
+                    <input type="number" min="1" class="form-control" name="pregnancy_number" placeholder="Pregnancy Number">
+                </div>
+
+                <!-- Remarks -->
+                <div class="mb-3">
+                    <input type="text" class="form-control" name="remarks" placeholder="Remarks">
+                </div>
+
+                <button class="submit-btn" type="submit">Submit</button>
+            </form>
         </div>
     </main>
 
@@ -497,29 +285,62 @@ function age_of($dob) {
 </div>
 
 <script>
-/* Select all */
-document.getElementById('chkAll')?.addEventListener('change', function(){
-    document.querySelectorAll('.selbox:not(:disabled)').forEach(cb => cb.checked = this.checked);
+/* Load patients (NOT yet enrolled) when barangay changes */
+const brgySel = document.getElementById('barangay_id');
+const patSel  = document.getElementById('patient_id');
+const ageOut  = document.getElementById('age_display');
+
+brgySel.addEventListener('change', () => {
+    const id = brgySel.value;
+    patSel.innerHTML = '<option value="">Loading...</option>';
+    patSel.disabled = true;
+    ageOut.value = '';
+
+    if (!id) { patSel.innerHTML = '<option value="">Select Patient</option>'; return; }
+
+    fetch('get_unenrolled_patients.php?barangay_id=' + encodeURIComponent(id))
+      .then(r => r.json())
+      .then(rows => {
+          patSel.innerHTML = '<option value="">Select Patient</option>';
+          rows.forEach(p => {
+              const opt = document.createElement('option');
+              opt.value = p.id;
+              opt.textContent = p.full_name;
+              if (p.dob) opt.dataset.dob = p.dob; // for age compute
+              patSel.appendChild(opt);
+          });
+          patSel.disabled = false;
+      })
+      .catch(() => {
+          patSel.innerHTML = '<option value="">Failed to load</option>';
+      });
 });
 
-/* Bulk enroll: copy selected IDs into hidden form and submit */
-function submitBulkEnroll(){
-    const sel = Array.from(document.querySelectorAll('.selbox:checked')).map(cb => cb.value);
-    if (sel.length === 0) {
-        alert('Select at least one patient to enroll.');
-        return;
-    }
-    const cont = document.getElementById('bulkContainer');
-    cont.innerHTML = '';
-    sel.forEach(id => {
-        const input = document.createElement('input');
-        input.type = 'hidden';
-        input.name = 'patient_ids[]';
-        input.value = id;
-        cont.appendChild(input);
-    });
-    document.getElementById('bulkEnrollForm').submit();
-}
+/* Age auto-fill from selected patient */
+patSel.addEventListener('change', () => {
+    const opt = patSel.options[patSel.selectedIndex];
+    const dob = opt ? opt.dataset.dob : null;
+    if (!dob) { ageOut.value = ''; return; }
+    try {
+        const d = new Date(dob);
+        const diff = new Date(Date.now() - d.getTime());
+        const age = Math.abs(diff.getUTCFullYear() - 1970);
+        ageOut.value = isFinite(age) ? age : '';
+    } catch(e){ ageOut.value = ''; }
+});
+
+/* Auto-calc EDD from LMP (+280 days) */
+const lmp = document.getElementById('lmp');
+const edd = document.getElementById('edd');
+lmp.addEventListener('change', () => {
+    if (!lmp.value) return;
+    const d = new Date(lmp.value);
+    d.setDate(d.getDate() + 280);
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,'0');
+    const day = String(d.getDate()).padStart(2,'0');
+    edd.value = `${y}-${m}-${day}`;
+});
 </script>
 </body>
 </html>
