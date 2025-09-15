@@ -263,6 +263,7 @@ function risk_level($r) {
             <div class="add-links text-end">
                 <a href="add_monitoring.php">+ Add&nbsp;&nbsp;Patient for Monitoring</a>
                 <a href="add_previous_pregnancy.php">+ Add Previous Pregnancy Record</a>
+                <a href="manage_prenatal_unenroll.php">- Unenroll Patient</a>
             </div>
         </div>
 
@@ -315,7 +316,7 @@ function risk_level($r) {
                             </td>
                             <td class="text-center"><?= h($r['barangay'] ?? '—') ?></td>
                             <td class="text-center"><?= $edd ?></td>
-                            <td class="text-center"><a href="edit_pregnancy.php?id=<?= (int)$r['id']; ?>">View</a></td>
+                            <td class="text-center"><a href="monitoring_details.php?patient_id=<?= (int)$r['id']; ?>">View / Update</a></td>
                             <td class="text-center"><span class="pill <?= $status_cls ?>"><?= h($status_txt) ?></span></td>
                             <td class="text-center"><?= $done . " of " . $required ?></td>
                             <td class="text-center"><a href="prenatal_checkup.php?patient_id=<?= (int)$r['id']; ?>">Checkup</a></td>
