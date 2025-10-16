@@ -255,8 +255,8 @@ $handle_display   = '@' . preg_replace('/\s+/', '', strtolower($username_display
         </div>
 
         <a class="navlink active" href="#"><i class="bi bi-speedometer2"></i> Dashboard</a>
-        <a class="navlink" href="#"><i class="bi bi-people"></i> Patients</a>
-        <a class="navlink" href="#"><i class="bi bi-person-badge"></i> Midwives</a>
+        <a class="navlink" href="superadmin_patients.php"><i class="bi bi-people"></i> Patients</a>
+        <a class="navlink" href="superadmin_manage_midwives.php"><i class="bi bi-person-badge"></i> Midwives</a>
         <a class="navlink" href="#"><i class="bi bi-megaphone"></i> Announcements</a>
         <a class="navlink" href="#"><i class="bi bi-building"></i> Brgy. Health Centers</a>
         <a class="navlink" href="#"><i class="bi bi-heart-pulse"></i> Prenatal Monitoring</a>

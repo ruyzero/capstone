@@ -198,12 +198,13 @@ $handle = '@' . strtolower(preg_replace('/\s+/', '', "rhu{$municipality_name}"))
             <a class="nav-link" href="barangay_health_centers.php"><i class="bi bi-hospital"></i> Brgy. Health Centers</a>
             <a class="nav-link" href="prenatal_monitoring.php"><i class="bi bi-clipboard2-pulse"></i> Prenatal Monitoring</a>
             <a class="nav-link" href="request_data_transfer.php"><i class="bi bi-arrow-left-right"></i> Request Data Transfer</a>
-            <a class="nav-link" href="manage_accounts.php"><i class="bi bi-person-fill-gear"></i> Manage Accounts</a>
+            <a class="nav-link" href="manage_accounts_admin.php"><i class="bi bi-person-fill-gear"></i> Manage Accounts</a>
             <hr>
             <a class="nav-link" href="my_account.php"><i class="bi bi-person-circle"></i> My Account</a>
             <a class="nav-link" href="logout.php"><i class="bi bi-box-arrow-right"></i> Sign Out</a>
         </nav>
     </aside>
+    
 
     <!-- ===== Main (center column) ===== -->
     <main class="main">

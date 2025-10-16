@@ -3,12 +3,12 @@ session_start();
 require 'db.php';
 date_default_timezone_set('Asia/Manila');
 
-/* Auth */
-if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
+/* ---------- Auth: SUPER ADMIN ONLY ---------- */
+if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'super_admin') {
     header("Location: index.php"); exit();
 }
 
-/* Helpers */
+/* ---------- Helpers ---------- */
 function h($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 function full_name($r) {
     $parts = array_filter([$r['first_name']??'', $r['middle_name']??'', $r['last_name']??'', $r['suffix']??''], fn($x)=>$x!==null && trim($x)!=='');
@@ -31,7 +31,6 @@ function calc_age($dob) {
     if (!$dob) return null;
     try { $d = new DateTime($dob); return (new DateTime())->diff($d)->y; } catch(Exception $e){ return null; }
 }
-/* DB helpers */
 function table_exists(mysqli $conn, string $name): bool {
     $q = $conn->prepare("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1");
     $q->bind_param("s", $name);
@@ -51,38 +50,67 @@ function first_existing_column(mysqli $conn, string $table, array $candidates): 
     return null;
 }
 
-/* Identity */
-$municipality_id   = (int)($_SESSION['municipality_id'] ?? 0);
-$municipality_name = $_SESSION['municipality_name'] ?? '';
-$username          = $_SESSION['username'] ?? 'admin';
-$handle            = '@' . strtolower(preg_replace('/\s+/', '', "rhu{$municipality_name}"));
+/* ---------- Filters & search (GET) ---------- */
+$q              = trim($_GET['q'] ?? '');
+$region_id      = (int)($_GET['region_id'] ?? 0);
+$province_id    = (int)($_GET['province_id'] ?? 0);
+$municipality_id= (int)($_GET['municipality_id'] ?? 0);
+$barangay_id    = (int)($_GET['barangay_id'] ?? 0);
 
-if ($municipality_name === '' && $municipality_id > 0) {
-    $stmt = $conn->prepare("SELECT name FROM municipalities WHERE id = ? LIMIT 1");
-    $stmt->bind_param("i", $municipality_id);
-    $stmt->execute();
-    $row = $stmt->get_result()->fetch_assoc();
-    if ($row) $municipality_name = $row['name'];
-    $stmt->close();
+/* ---------- Select options ---------- */
+$regions = $conn->query("SELECT id, name FROM regions ORDER BY name");
+$provinces = null;
+if ($region_id > 0) {
+    $sp = $conn->prepare("SELECT id, name FROM provinces WHERE region_id = ? ORDER BY name");
+    $sp->bind_param("i", $region_id);
+    $sp->execute(); $provinces = $sp->get_result(); $sp->close();
+}
+$municipalities = null;
+if ($province_id > 0) {
+    $sm = $conn->prepare("SELECT id, name FROM municipalities WHERE province_id = ? ORDER BY name");
+    $sm->bind_param("i", $province_id);
+    $sm->execute(); $municipalities = $sm->get_result(); $sm->close();
+}
+$barangays_opts = null;
+if ($municipality_id > 0) {
+    $sb = $conn->prepare("SELECT id, name FROM barangays WHERE municipality_id = ? ORDER BY name");
+    $sb->bind_param("i", $municipality_id);
+    $sb->execute(); $barangays_opts = $sb->get_result(); $sb->close();
 }
 
-if (!$municipality_id) { die("No municipality set for this admin."); }
+/* ---------- Right-rail stats (respect filters) ---------- */
+$types = ''; $params = [];
+$where_pw = [];
+$join_pw = " LEFT JOIN municipalities m ON m.id = pw.municipality_id
+             LEFT JOIN provinces pr ON pr.id = m.province_id
+             LEFT JOIN barangays b ON b.id = pw.barangay_id ";
+if ($barangay_id > 0)      { $where_pw[]="pw.barangay_id = ?";    $types.='i'; $params[]=$barangay_id; }
+elseif ($municipality_id>0){ $where_pw[]="pw.municipality_id = ?"; $types.='i'; $params[]=$municipality_id; }
+elseif ($province_id > 0)  { $where_pw[]="pr.id = ?";              $types.='i'; $params[]=$province_id; }
+elseif ($region_id > 0)    { $where_pw[]="pr.region_id = ?";       $types.='i'; $params[]=$region_id; }
 
-/* Search */
-$q = trim($_GET['q'] ?? '');
-
-/* Right rail stats */
-$c1 = $conn->prepare("SELECT COUNT(*) AS c FROM pregnant_women WHERE municipality_id = ?");
-$c1->bind_param("i", $municipality_id); $c1->execute();
-$tot_patients = (int)($c1->get_result()->fetch_assoc()['c'] ?? 0);
-
-$c2 = $conn->prepare("SELECT COUNT(*) AS c FROM barangays WHERE municipality_id = ?");
-$c2->bind_param("i", $municipality_id); $c2->execute();
-$tot_brgy = (int)($c2->get_result()->fetch_assoc()['c'] ?? 0);
-
+$sql_tot = "SELECT COUNT(*) c FROM pregnant_women pw $join_pw";
+if ($where_pw) $sql_tot .= " WHERE ".implode(" AND ", $where_pw);
+$st = $conn->prepare($sql_tot);
+if ($types) $st->bind_param($types, ...$params);
+$st->execute(); $tot_patients = (int)($st->get_result()->fetch_assoc()['c'] ?? 0); $st->close();
 $tot_pregnant = $tot_patients;
 
-/* Detect checkups table + patient id column for counting */
+$typesB=''; $paramsB=[]; $whereB=[];
+$joinB = " JOIN municipalities m ON m.id = b.municipality_id
+           JOIN provinces pr ON pr.id = m.province_id ";
+if ($municipality_id>0) { $whereB[]="b.municipality_id = ?"; $typesB.='i'; $paramsB[]=$municipality_id; }
+elseif ($province_id>0) { $whereB[]="m.province_id = ?";      $typesB.='i'; $paramsB[]=$province_id; }
+elseif ($region_id>0)   { $whereB[]="pr.region_id = ?";       $typesB.='i'; $paramsB[]=$region_id; }
+elseif ($barangay_id>0) { $whereB[]="b.id = ?";               $typesB.='i'; $paramsB[]=$barangay_id; }
+
+$sql_brgy = "SELECT COUNT(*) c FROM barangays b $joinB";
+if ($whereB) $sql_brgy .= " WHERE ".implode(" AND ", $whereB);
+$sb = $conn->prepare($sql_brgy);
+if ($typesB) $sb->bind_param($typesB, ...$paramsB);
+$sb->execute(); $tot_brgy = (int)($sb->get_result()->fetch_assoc()['c'] ?? 0); $sb->close();
+
+/* ---------- Checkups table/column detection ---------- */
 $HAS_CHECKUPS = table_exists($conn, 'prenatal_checkups');
 $checkups_patient_col = null;
 if ($HAS_CHECKUPS) {
@@ -90,7 +118,7 @@ if ($HAS_CHECKUPS) {
         ['patient_id','pregnant_woman_id','woman_id','pw_id','pregnancy_id']);
 }
 
-/* Enrolled patients + details + barangay (+ dynamic count from checkups) */
+/* ---------- Enrolled patients (respect filters + search) ---------- */
 $sql = "
     SELECT 
         p.*,
@@ -107,31 +135,30 @@ if ($HAS_CHECKUPS && $checkups_patient_col) {
         (SELECT COUNT(*) FROM prenatal_checkups c WHERE c.`{$checkups_patient_col}` = p.id) AS chk_count
     ";
 } else {
-    $sql .= ",
-        NULL AS chk_count
-    ";
+    $sql .= ", NULL AS chk_count ";
 }
 $sql .= "
     FROM prenatal_enrollments e
     INNER JOIN pregnant_women p ON p.id = e.patient_id
     LEFT JOIN prenatal_monitoring_details d ON d.patient_id = e.patient_id
     LEFT JOIN barangays b ON b.id = p.barangay_id
-    WHERE p.municipality_id = ?
+    LEFT JOIN municipalities m ON m.id = p.municipality_id
+    LEFT JOIN provinces pr ON pr.id = m.province_id
+    LEFT JOIN regions r ON r.id = pr.region_id
+    WHERE 1=1
 ";
-
-$params = [$municipality_id];
-$types  = "i";
-
+$typesL=''; $paramsL=[];
+if ($barangay_id > 0)       { $sql .= " AND p.barangay_id = ?";      $typesL.='i'; $paramsL[]=$barangay_id; }
+elseif ($municipality_id>0) { $sql .= " AND p.municipality_id = ?";  $typesL.='i'; $paramsL[]=$municipality_id; }
+elseif ($province_id > 0)   { $sql .= " AND pr.id = ?";              $typesL.='i'; $paramsL[]=$province_id; }
+elseif ($region_id > 0)     { $sql .= " AND r.id = ?";               $typesL.='i'; $paramsL[]=$region_id; }
 if ($q !== '') {
     $sql .= " AND (CONCAT_WS(' ', p.first_name, p.middle_name, p.last_name, p.suffix) LIKE ? OR b.name LIKE ?)";
-    $like = "%$q%";
-    $params[] = $like; $params[] = $like; $types .= "ss";
+    $like = "%$q%"; $typesL .= "ss"; $paramsL[]=$like; $paramsL[]=$like;
 }
-
 $sql .= " ORDER BY e.enrolled_at DESC, p.last_name IS NULL, p.last_name ASC, p.first_name ASC";
-
 $stmt = $conn->prepare($sql);
-$stmt->bind_param($types, ...$params);
+if ($typesL) $stmt->bind_param($typesL, ...$paramsL);
 $stmt->execute();
 $rows = $stmt->get_result();
 ?>
@@ -139,7 +166,7 @@ $rows = $stmt->get_result();
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Prenatal Monitoring • RHU-MIS</title>
+<title>Prenatal Monitoring (Super Admin) • RHU-MIS</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons/font/bootstrap-icons.css" rel="stylesheet">
@@ -157,8 +184,9 @@ $rows = $stmt->get_result();
     .nav-link.active{ background:linear-gradient(135deg,#2fd4c8,#0fb5aa); color:#fff; }
     .nav-link i{ width:22px; text-align:center; margin-right:8px; }
     .main{ padding:24px; background:#fff; }
-    .topbar{ display:flex; justify-content:space-between; align-items:center; margin-bottom:22px; }
-    .searchbar{ flex:1; max-width:640px; position:relative; }
+    .filters{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+    .topbar{ display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; gap:12px; flex-wrap:wrap; }
+    .searchbar{ position:relative; }
     .searchbar input{ padding-left:40px; height:44px; border-radius:999px; background:#f7f9fb; border:1px solid #e6ebf0; }
     .searchbar i{ position:absolute; left:14px; top:50%; transform:translateY(-50%); color:#64748b; }
     .add-links a{ display:block; font-weight:700; color:var(--brand); text-decoration:none; }
@@ -194,40 +222,89 @@ $rows = $stmt->get_result();
 <body>
 
 <div class="layout">
+    <!-- Left -->
     <aside class="leftbar">
         <div class="brand">
             <div class="mark">R</div>
             <div>
                 <div>RHU-MIS</div>
-                <small class="text-muted"><?= h(strtoupper($municipality_name)) ?></small>
+                <small class="text-muted">SUPER ADMIN</small>
             </div>
         </div>
 
         <nav class="nav flex-column gap-1">
-            <a class="nav-link" href="admin_dashboard.php"><i class="bi bi-speedometer2"></i> Dashboard</a>
-            <a class="nav-link" href="view_pregnancies.php"><i class="bi bi-people"></i> Patients</a>
-            <a class="nav-link" href="manage_midwives.php"><i class="bi bi-person-heart"></i> Midwives</a>
-            <a class="nav-link" href="manage_announcements.php"><i class="bi bi-megaphone"></i> Announcements</a>
-            <a class="nav-link" href="barangay_health_centers.php"><i class="bi bi-hospital"></i> Brgy. Health Centers</a>
-            <a class="nav-link active" href="prenatal_monitoring.php"><i class="bi bi-clipboard2-pulse"></i> Prenatal Monitoring</a>
-            <a class="nav-link" href="request_data_transfer.php"><i class="bi bi-arrow-left-right"></i> Request Data Transfer</a>
-            <a class="nav-link" href="manage_accounts.php"><i class="bi bi-person-fill-gear"></i> Manage Accounts</a>
+            <a class="nav-link" href="super_admin_dashboard.php"><i class="bi bi-speedometer2"></i> Dashboard</a>
+            <a class="nav-link" href="superadmin_patients.php"><i class="bi bi-people"></i> Patients</a>
+            <a class="nav-link" href="superadmin_manage_midwives.php"><i class="bi bi-person-heart"></i> Midwives</a>
+            <a class="nav-link" href="superadmin_manage_announcements.php"><i class="bi bi-megaphone"></i> Announcements</a>
+            <a class="nav-link" href="superadmin_barangay_health_centers.php"><i class="bi bi-building"></i> Brgy. Health Centers</a>
+            <a class="nav-link active" href="superadmin_prenatal_monitoring.php"><i class="bi bi-clipboard2-pulse"></i> Prenatal Monitoring</a>
             <hr>
             <a class="nav-link" href="my_account.php"><i class="bi bi-person-circle"></i> My Account</a>
             <a class="nav-link" href="logout.php"><i class="bi bi-box-arrow-right"></i> Sign Out</a>
         </nav>
     </aside>
 
+    <!-- Main -->
     <main class="main">
+        <!-- Filters -->
+        <form method="get" class="filters">
+            <div>
+                <label class="form-label">Region</label>
+                <select name="region_id" class="form-select" onchange="this.form.submit()">
+                    <option value="0">All Regions</option>
+                    <?php if ($regions && $regions->num_rows): while($r=$regions->fetch_assoc()): ?>
+                        <option value="<?= (int)$r['id'] ?>" <?= $region_id==(int)$r['id']?'selected':'' ?>><?= h($r['name']) ?></option>
+                    <?php endwhile; endif; ?>
+                </select>
+            </div>
+            <div>
+                <label class="form-label">Province</label>
+                <select name="province_id" class="form-select" <?= $region_id? '':'disabled' ?> onchange="this.form.submit()">
+                    <option value="0"><?= $region_id? 'All Provinces' : '— Select Region —' ?></option>
+                    <?php if ($provinces && $provinces->num_rows): while($p=$provinces->fetch_assoc()): ?>
+                        <option value="<?= (int)$p['id'] ?>" <?= $province_id==(int)$p['id']?'selected':'' ?>><?= h($p['name']) ?></option>
+                    <?php endwhile; endif; ?>
+                </select>
+            </div>
+            <div>
+                <label class="form-label">Municipality</label>
+                <select name="municipality_id" class="form-select" <?= $province_id? '':'disabled' ?> onchange="this.form.submit()">
+                    <option value="0"><?= $province_id? 'All Municipalities' : '— Select Province —' ?></option>
+                    <?php if ($municipalities && $municipalities->num_rows): while($m=$municipalities->fetch_assoc()): ?>
+                        <option value="<?= (int)$m['id'] ?>" <?= $municipality_id==(int)$m['id']?'selected':'' ?>><?= h($m['name']) ?></option>
+                    <?php endwhile; endif; ?>
+                </select>
+            </div>
+            <div>
+                <label class="form-label">Barangay</label>
+                <select name="barangay_id" class="form-select" <?= $municipality_id? '':'disabled' ?> onchange="this.form.submit()">
+                    <option value="0"><?= $municipality_id? 'All Barangays' : '— Select Municipality —' ?></option>
+                    <?php if ($barangays_opts && $barangays_opts->num_rows): while($b=$barangays_opts->fetch_assoc()): ?>
+                        <option value="<?= (int)$b['id'] ?>" <?= $barangay_id==(int)$b['id']?'selected':'' ?>><?= h($b['name']) ?></option>
+                    <?php endwhile; endif; ?>
+                </select>
+            </div>
+            <div class="ms-auto" style="min-width:280px;">
+                <label class="form-label">Search</label>
+                <div class="searchbar">
+                    <i class="bi bi-search"></i>
+                    <input type="text" name="q" class="form-control" placeholder="Search patient or barangay" value="<?= h($q) ?>">
+                </div>
+            </div>
+            <div class="align-self-end">
+                <button class="btn btn-outline-secondary">Apply</button>
+                <a class="btn btn-outline-dark" href="superadmin_prenatal_monitoring.php">Reset</a>
+            </div>
+        </form>
+
+        <!-- Topbar Quick Actions (added) -->
         <div class="topbar">
-            <form class="searchbar me-3" method="get" action="">
-                <i class="bi bi-search"></i>
-                <input type="text" name="q" class="form-control" placeholder="Search patient or barangay" value="<?= h($q) ?>">
-            </form>
+            <div></div>
             <div class="add-links text-end">
-                <a href="add_monitoring.php">+ Add&nbsp;&nbsp;Patient for Monitoring</a>
-                <a href="add_previous_pregnancy.php">+ Add Previous Pregnancy Record</a>
-                <a href="manage_prenatal_unenroll.php">- Unenroll Patient</a>
+                <a href="superadmin_add_monitoring.php">+ Add&nbsp;&nbsp;Patient for Monitoring</a>
+                <a href="superadmin_add_previous_pregnancy.php">+ Add Previous Pregnancy Record</a>
+                <a href="superadmin_manage_prenatal_unenroll.php">- Unenroll Patient</a>
             </div>
         </div>
 
@@ -256,7 +333,7 @@ $rows = $stmt->get_result();
                             $name        = full_name($r);
                             $edd_display = calc_edd_display($r['d_edd'] ?? null, $r['d_lmp'] ?? null);
 
-                            // PRIMARY source: count from prenatal_checkups; fallback to details.checkups_done; clamp to 3
+                            // PRIMARY: count from prenatal_checkups; fallback to details.checkups_done; clamp to 3
                             if (isset($r['chk_count']) && is_numeric($r['chk_count'])) {
                                 $done = (int)$r['chk_count'];
                             } elseif (isset($r['d_checkups_done']) && is_numeric($r['d_checkups_done'])) {
@@ -269,12 +346,12 @@ $rows = $stmt->get_result();
 
                             $next_sched  = pretty_date_or_na($r['d_next_schedule'] ?? null);
 
-                            // status: derive from checkups_done (simple)
+                            // status by checkups_done (simple)
                             $is_done     = ($done >= $required);
                             $status_txt  = $is_done ? 'Completed' : 'Under Monitoring';
                             $status_cls  = $is_done ? 'status-done' : 'status-under';
 
-                            // risk color: prefer stored risk_level, else age-based heuristic
+                            // risk color: prefer stored risk_level, else age heuristic
                             $risk        = strtolower($r['d_risk'] ?? '');
                             if (!in_array($risk, ['normal','caution','high'], true)) {
                                 $age = calc_age($r['dob'] ?? null);
@@ -285,7 +362,7 @@ $rows = $stmt->get_result();
                         ?>
                         <tr>
                             <td class="text-start">
-                                <a class="name-risk <?= $riskClass ?>" href="view_pregnancy_detail.php?id=<?= (int)$r['id']; ?>">
+                                <a class="name-risk <?= $riskClass ?>" href="superadmin_view_pregnancy_detail.php?id=<?= (int)$r['id']; ?>">
                                     <?= h($name ?: '—') ?>
                                 </a>
                             </td>
@@ -318,12 +395,13 @@ $rows = $stmt->get_result();
         </div>
     </main>
 
+    <!-- Right -->
     <aside class="rail">
         <div class="profile">
             <div class="avatar"><i class="bi bi-person"></i></div>
             <div>
-                <div class="fw-bold"><?= h($username) ?></div>
-                <div class="text-muted small"><?= h($handle) ?></div>
+                <div class="fw-bold"><?= h($_SESSION['username'] ?? 'superadmin') ?></div>
+                <div class="text-muted small">@superadmin</div>
             </div>
         </div>
 

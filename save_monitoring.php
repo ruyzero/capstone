@@ -3,93 +3,116 @@ session_start();
 require 'db.php';
 date_default_timezone_set('Asia/Manila');
 
+/* --- Auth --- */
 if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
     header("Location: index.php"); exit();
 }
 
+/* --- Helpers --- */
+function h($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
+
+/* --- Identity --- */
 $municipality_id = (int)($_SESSION['municipality_id'] ?? 0);
-$enrolled_by     = (int)($_SESSION['user_id'] ?? 0);
+$user_id         = (int)($_SESSION['user_id'] ?? 0);
+if (!$municipality_id) { $_SESSION['error'] = "No municipality set."; header("Location: prenatal_monitoring.php"); exit(); }
 
-function back_with($msg, $ok=false){
-    $_SESSION[$ok ? 'success' : 'error'] = $msg;
-    header("Location: add_monitoring.php");
-    exit();
+/* --- Input --- */
+$barangay_id    = (int)($_POST['barangay_id'] ?? 0);
+$patient_id     = (int)($_POST['patient_id'] ?? 0);
+
+$lmp            = trim($_POST['lmp'] ?? '');
+$edd            = trim($_POST['edd'] ?? '');
+$gravida        = trim($_POST['gravida'] ?? '');
+$para           = trim($_POST['para'] ?? '');
+$abortions      = trim($_POST['abortions'] ?? '');
+$height_cm      = trim($_POST['height_cm'] ?? '');
+$weight_kg      = trim($_POST['weight_kg'] ?? '');
+$risk_level     = trim($_POST['risk_level'] ?? '');
+$checkups_done  = ($_POST['checkups_done'] === '' ? null : (int)$_POST['checkups_done']);
+$next_schedule  = trim($_POST['next_schedule'] ?? '');
+$notes          = trim($_POST['notes'] ?? '');
+
+/* --- Normalize/guard --- */
+if ($checkups_done !== null) {
+    if ($checkups_done < 0) $checkups_done = 0;
+    if ($checkups_done > 3) $checkups_done = 3;
+}
+$lmp           = ($lmp !== '') ? $lmp : null;
+$edd           = ($edd !== '') ? $edd : null;
+$next_schedule = ($next_schedule !== '') ? $next_schedule : null;
+
+if (!$barangay_id || !$patient_id) {
+    $_SESSION['error'] = "Please select barangay and patient.";
+    header("Location: add_monitoring.php"); exit();
 }
 
-$barangay_id       = (int)($_POST['barangay_id'] ?? 0);
-$patient_id        = (int)($_POST['patient_id'] ?? 0);
-$first_checkup_date= $_POST['first_checkup_date'] ?? null;
-$weight_kg         = $_POST['weight_kg'] ?? null;
-$height_ft         = $_POST['height_ft'] ?? null;
-$nutritional_status= $_POST['nutritional_status'] ?? null;
-$lmp               = $_POST['lmp'] ?? null;
-$edd               = $_POST['edd'] ?? null;
-$pregnancy_number  = $_POST['pregnancy_number'] ?? null;
-$remarks           = $_POST['remarks'] ?? null;
-
-if (!$municipality_id || !$barangay_id || !$patient_id || !$first_checkup_date) {
-    back_with("Please complete required fields (barangay, patient, first checkup date).");
-}
-
-/* Validate patient belongs to your municipality + barangay and not already enrolled */
-$sql = "
-    SELECT p.id
-    FROM pregnant_women p
-    LEFT JOIN prenatal_enrollments e ON e.patient_id = p.id
-    WHERE p.id = ?
-      AND p.municipality_id = ?
-      AND p.barangay_id = ?
-      AND e.patient_id IS NULL
-";
-$chk = $conn->prepare($sql);
-$chk->bind_param("iii", $patient_id, $municipality_id, $barangay_id);
+/* --- Validate patient belongs to municipality --- */
+$chk = $conn->prepare("SELECT 1 FROM pregnant_women WHERE id = ? AND municipality_id = ? LIMIT 1");
+$chk->bind_param("ii", $patient_id, $municipality_id);
 $chk->execute();
-$valid = $chk->get_result()->num_rows > 0;
+if (!$chk->get_result()->fetch_row()) {
+    $_SESSION['error'] = "Invalid patient/municipality."; header("Location: add_monitoring.php"); exit();
+}
 $chk->close();
 
-if (!$valid) { back_with("Invalid patient selection, or already enrolled."); }
+/* --- Ensure enrollment row exists (roster only) --- */
+$sel = $conn->prepare("SELECT id FROM prenatal_enrollments WHERE patient_id = ? LIMIT 1");
+$sel->bind_param("i", $patient_id);
+$sel->execute();
+$er = $sel->get_result()->fetch_assoc();
+$sel->close();
 
-/* Enroll */
-$ins = $conn->prepare("INSERT INTO prenatal_enrollments (patient_id, enrolled_by) VALUES (?, ?)");
-$ins->bind_param("ii", $patient_id, $enrolled_by);
-if (!$ins->execute()) {
-    back_with("Failed to enroll: ".$ins->error);
-}
-$ins->close();
-
-/* OPTIONAL: update some details in pregnant_women if columns exist */
-function col_exists(mysqli $conn, string $tbl, string $col): bool {
-    $q = $conn->prepare("
-        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1
-    ");
-    $q->bind_param("ss", $tbl, $col);
-    $q->execute();
-    $ok = $q->get_result()->num_rows > 0;
-    $q->close();
-    return $ok;
-}
-$fields = [];
-$types  = '';
-$vals   = [];
-
-/* only add when column exists in your pregnant_women table */
-if ($first_checkup_date && col_exists($conn,'pregnant_women','first_checkup_date')) { $fields[]='first_checkup_date=?'; $types.='s'; $vals[]=$first_checkup_date; }
-if ($lmp && col_exists($conn,'pregnant_women','lmp'))                                   { $fields[]='lmp=?';                $types.='s'; $vals[]=$lmp; }
-if ($edd && col_exists($conn,'pregnant_women','edd'))                                   { $fields[]='edd=?';                $types.='s'; $vals[]=$edd; }
-if ($weight_kg!==null && col_exists($conn,'pregnant_women','weight_kg'))                { $fields[]='weight_kg=?';          $types.='d'; $vals[]=$weight_kg; }
-if ($height_ft!==null && col_exists($conn,'pregnant_women','height_ft'))                { $fields[]='height_ft=?';          $types.='d'; $vals[]=$height_ft; }
-if ($nutritional_status && col_exists($conn,'pregnant_women','nutritional_status'))     { $fields[]='nutritional_status=?'; $types.='s'; $vals[]=$nutritional_status; }
-if ($pregnancy_number && col_exists($conn,'pregnant_women','pregnancy_number'))         { $fields[]='pregnancy_number=?';   $types.='i'; $vals[]=(int)$pregnancy_number; }
-if ($remarks && col_exists($conn,'pregnant_women','remarks'))                            { $fields[]='remarks=?';            $types.='s'; $vals[]=$remarks; }
-
-if (!empty($fields)) {
-    $sqlu = "UPDATE pregnant_women SET ".implode(', ', $fields)." WHERE id = ?";
-    $types .= 'i'; $vals[] = $patient_id;
-    $u = $conn->prepare($sqlu);
-    $u->bind_param($types, ...$vals);
-    $u->execute(); // ignore failure to keep enrollment success
-    $u->close();
+if ($er) {
+    $eid = (int)$er['id'];
+    $u = $conn->prepare("UPDATE prenatal_enrollments SET enrolled_at = COALESCE(enrolled_at, NOW()), enrolled_by = COALESCE(enrolled_by, ?) WHERE id = ?");
+    $u->bind_param("ii", $user_id, $eid);
+    $u->execute(); $u->close();
+} else {
+    $i = $conn->prepare("INSERT INTO prenatal_enrollments (patient_id, enrolled_at, enrolled_by) VALUES (?, NOW(), ?)");
+    $i->bind_param("ii", $patient_id, $user_id);
+    $i->execute(); $i->close();
 }
 
-back_with("Patient enrolled to Prenatal Monitoring.", true);
+/* --- Upsert into clinical source of truth: prenatal_monitoring_details --- */
+$has = $conn->prepare("SELECT 1 FROM prenatal_monitoring_details WHERE patient_id = ? LIMIT 1");
+$has->bind_param("i", $patient_id);
+$has->execute();
+$exists = (bool)$has->get_result()->fetch_row();
+$has->close();
+
+if ($exists) {
+    $sql = "UPDATE prenatal_monitoring_details
+            SET lmp = ?, edd = ?, next_schedule = ?,
+                checkups_done = IFNULL(?, checkups_done),
+                gravida = NULLIF(?, ''), para = NULLIF(?, ''), abortions = NULLIF(?, ''),
+                height_cm = NULLIF(?, ''), weight_kg = NULLIF(?, ''), risk_level = NULLIF(?, ''),
+                notes = NULLIF(?, ''), updated_at = NOW(), updated_by = ?
+            WHERE patient_id = ?";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param(
+        "sssisssssssii",
+        $lmp, $edd, $next_schedule,
+        $checkups_done,
+        $gravida, $para, $abortions,
+        $height_cm, $weight_kg, $risk_level,
+        $notes, $user_id, $patient_id
+    );
+    $stmt->execute(); $stmt->close();
+} else {
+    $sql = "INSERT INTO prenatal_monitoring_details
+            (patient_id, lmp, edd, next_schedule, checkups_done,
+             gravida, para, abortions, height_cm, weight_kg, risk_level, notes,
+             created_at, created_by, updated_at, updated_by)
+            VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NOW(), ?, NOW(), ?)";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param(
+        "isssissssssssi",
+        $patient_id, $lmp, $edd, $next_schedule, $checkups_done,
+        $gravida, $para, $abortions, $height_cm, $weight_kg, $risk_level, $notes,
+        $user_id, $user_id
+    );
+    $stmt->execute(); $stmt->close();
+}
+
+$_SESSION['success'] = "Patient added/updated for monitoring.";
+header("Location: prenatal_monitoring.php");
